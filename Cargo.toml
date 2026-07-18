@@ -1,0 +1,18 @@
+[package]
+name = "rubik-scan"
+version = "0.1.0"
+edition = "2021"
+description = "Rubik's cube face scanner: YOLO-based sticker color detection"
+
+[dependencies]
+anyhow = "1"
+candle-core = { version = "0.11.0", default-features = false }
+candle-nn = { version = "0.11.0", default-features = false }
+clap = { version = "4", features = ["derive"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+
+# Release profile tuned for embedded (Milk-V Duo 256M, 256 MB RAM)
+[profile.release]
+strip = true
+lto = true
+opt-level = 2
