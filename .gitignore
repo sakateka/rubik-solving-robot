@@ -1,4 +1,43 @@
+# Rust build products
 target/
+
+# Python environments and caches
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Editor and OS state
+.vscode/
+.idea/
+.DS_Store
+
+# Local data: raw images, Label Studio exports and generated YOLO datasets
+images/
+dataset/
+dataset-v2/
+samples/
+project-*.zip
+*.cache
+*.npy
+
+# Trained weights, exported models and Ultralytics result directories
+models/
+runs/
+*.pt
+*.onnx
+*.cvimodel
+*.safetensors
+
+# Large vendor SDK checkout; retain only project-side build scripts in git
+duo-buildroot-sdk-v2
+
+# Local services, credentials and diagnostic output
+.env
+.env.*
+*.sqlite3
+*.db
+console-output*.txt
 tmp/
 test_face.png
-models/

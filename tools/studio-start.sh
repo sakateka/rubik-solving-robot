@@ -1,0 +1,1 @@
+podman run -it -p 8080:8080 -v /home/coder/vision-example/samples:/label-studio/data -v /home/coder/vision-example/images:/label-studio/files -e LABEL_STUDIO_LOCAL_FILES_SERVING_ENABLED=true -e LABEL_STUDIO_LOCAL_FILES_DOCUMENT_ROOT=/label-studio/files docker.io/heartexlabs/label-studio:latest
