@@ -22,13 +22,22 @@ project-*.zip
 *.cache
 *.npy
 
-# Trained weights, exported models and Ultralytics result directories
-models/
+# Trained weights, exported models and Ultralytics result directories.
+# `models/releases/` is an explicit public allowlist; everything else in
+# `models/` remains local.
+models/*
 runs/
+tpu/
 *.pt
 *.onnx
 *.cvimodel
 *.safetensors
+
+!models/README.md
+!models/releases/
+!models/releases/cube-yolov8n-v2.pt
+!models/releases/cube-yolov8n-v2-320.onnx
+!models/releases/cube-yolov8n-v2-320-cv181x-bf16.cvimodel
 
 # Large vendor SDK checkout; retain only project-side build scripts in git
 duo-buildroot-sdk-v2
