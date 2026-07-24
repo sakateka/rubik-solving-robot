@@ -39,9 +39,6 @@ tpu/
 !models/releases/cube-yolov8n-v2-320.onnx
 !models/releases/cube-yolov8n-v2-320-cv181x-bf16.cvimodel
 
-# Large vendor SDK checkout; retain only project-side build scripts in git
-duo-buildroot-sdk-v2
-
 # Local services, credentials and diagnostic output
 .env
 .env.*

@@ -28,6 +28,10 @@ pub struct Letterbox {
     pub pad_x: f32,
     /// Vertical padding (top), in model-input pixels
     pub pad_y: f32,
+    /// Position of this image inside the original camera frame. Letterboxed
+    /// images start at zero; fixed ROI images start at their crop origin.
+    pub origin_x: f32,
+    pub origin_y: f32,
 }
 
 impl Letterbox {
@@ -35,8 +39,8 @@ impl Letterbox {
     /// coordinates.
     pub fn to_original(&self, det: &Detection) -> Detection {
         Detection {
-            x: (det.x - self.pad_x) / self.scale,
-            y: (det.y - self.pad_y) / self.scale,
+            x: (det.x - self.pad_x) / self.scale + self.origin_x,
+            y: (det.y - self.pad_y) / self.scale + self.origin_y,
             w: det.w / self.scale,
             h: det.h / self.scale,
             ..*det
@@ -74,7 +78,52 @@ pub fn letterbox(img: &RgbImage, size: usize) -> Letterbox {
         scale,
         pad_x: pad_x as f32,
         pad_y: pad_y as f32,
+        origin_x: 0.0,
+        origin_y: 0.0,
     }
+}
+
+/// The crop used for both training and device inference. It intentionally has
+/// almost no horizontal background margin: an orange part of the rig used to
+/// produce false positives when the whole 1920x1080 frame was shown.
+#[cfg_attr(not(feature = "cvi-runtime"), allow(dead_code))]
+pub const CUBE_ROI: (u32, u32, u32, u32) = (464, 32, 1296, 864);
+
+/// Crop the fixed square cube ROI and resize it directly to the model input.
+/// This is deliberately *not* letterbox: training saw a square 832x832 crop
+/// scaled to 320x320 without padding.
+#[cfg_attr(not(feature = "cvi-runtime"), allow(dead_code))]
+pub fn cube_roi_resize(img: &RgbImage, size: usize) -> anyhow::Result<Letterbox> {
+    let (left, top, right, bottom) = CUBE_ROI;
+    if img.width() < right || img.height() < bottom {
+        anyhow::bail!(
+            "frame {}x{} is too small for cube ROI x={}..{}, y={}..{}",
+            img.width(),
+            img.height(),
+            left,
+            right,
+            top,
+            bottom
+        );
+    }
+    let roi = imageops::crop_imm(img, left, top, right - left, bottom - top).to_image();
+    let resized = imageops::resize(&roi, size as u32, size as u32, FilterType::Triangle);
+    let plane = size * size;
+    let mut data = vec![0.0f32; 3 * plane];
+    for (i, px) in resized.pixels().enumerate() {
+        data[i] = px[0] as f32 / 255.0;
+        data[plane + i] = px[1] as f32 / 255.0;
+        data[2 * plane + i] = px[2] as f32 / 255.0;
+    }
+    Ok(Letterbox {
+        data,
+        size,
+        scale: size as f32 / (right - left) as f32,
+        pad_x: 0.0,
+        pad_y: 0.0,
+        origin_x: left as f32,
+        origin_y: top as f32,
+    })
 }
 
 #[cfg(test)]
@@ -89,6 +138,7 @@ mod tests {
         assert_eq!(lb.scale, 0.5);
         assert_eq!(lb.pad_x, 0.0);
         assert_eq!(lb.pad_y, 40.0);
+        assert_eq!(lb.origin_x, 0.0);
         assert_eq!(lb.data.len(), 3 * 320 * 320);
     }
 
@@ -110,5 +160,22 @@ mod tests {
         assert_eq!(orig.x, 320.0);
         assert_eq!(orig.y, 240.0);
         assert_eq!(orig.w, 100.0);
+    }
+
+    #[test]
+    fn cube_roi_maps_model_center_back_to_camera_coordinates() {
+        let img = RgbImage::new(1920, 1080);
+        let roi = cube_roi_resize(&img, 320).unwrap();
+        let det = Detection {
+            x: 160.0,
+            y: 160.0,
+            w: 32.0,
+            h: 32.0,
+            class_id: 0,
+            confidence: 1.0,
+        };
+        let original = roi.to_original(&det);
+        assert_eq!(original.x, 880.0);
+        assert_eq!(original.y, 448.0);
     }
 }

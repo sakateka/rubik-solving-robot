@@ -4,12 +4,23 @@ version = "0.1.0"
 edition = "2021"
 description = "Rubik's cube face scanner: YOLO-based sticker color detection"
 
+[features]
+# Compiles the small C adapter for CVI Runtime. Enable only for the Milk-V
+# cross-build: it links against libcviruntime/libcvikernel from the SDK image.
+cvi-runtime = []
+# Compiles the VI/ISP camera probe against the CVI media stack.  It implies
+# cvi-runtime because both features are only meaningful in the Duo cross-build.
+cvi-camera = ["cvi-runtime"]
+
 [dependencies]
 anyhow = "1"
 candle-core = { version = "0.11.0", default-features = false }
 candle-nn = { version = "0.11.0", default-features = false }
 clap = { version = "4", features = ["derive"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+
+[build-dependencies]
+cc = "1"
 
 # Release profile tuned for embedded (Milk-V Duo 256M, 256 MB RAM)
 [profile.release]

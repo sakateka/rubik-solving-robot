@@ -258,6 +258,8 @@ mod tests {
             scale: 1.0,
             pad_x: 0.0,
             pad_y: 0.0,
+            origin_x: 0.0,
+            origin_y: 0.0,
         };
         let _ = img; // the blank tensor above stands in for a real frame here
         let detector =

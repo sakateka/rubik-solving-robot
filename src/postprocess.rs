@@ -63,6 +63,26 @@ pub fn filter_confidence(dets: Vec<Detection>, threshold: f32) -> Vec<Detection>
         .collect()
 }
 
+/// Keep only boxes whose centers lie in the expected central part of the
+/// model image. The physical stand is nearly static; this deliberately rejects
+/// distant rig/background objects before the "exactly 9" safety check.
+pub fn filter_center_window(
+    dets: Vec<Detection>,
+    input_size: f32,
+    min_x: f32,
+    max_x: f32,
+    min_y: f32,
+    max_y: f32,
+) -> Vec<Detection> {
+    dets.into_iter()
+        .filter(|d| {
+            let x = d.x / input_size;
+            let y = d.y / input_size;
+            (min_x..=max_x).contains(&x) && (min_y..=max_y).contains(&y)
+        })
+        .collect()
+}
+
 /// NMS, class-agnostic variant: duplicates are suppressed regardless of
 /// class.
 ///
@@ -146,5 +166,13 @@ mod tests {
         let kept = filter_confidence(dets, 0.5);
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].confidence, 0.6);
+    }
+
+    #[test]
+    fn center_window_removes_distant_background_box() {
+        let center = det(160.0, 160.0, 0, 0.9);
+        let background = det(310.0, 160.0, 3, 0.9);
+        let kept = filter_center_window(vec![center, background], 320.0, 0.05, 0.90, 0.05, 0.95);
+        assert_eq!(kept, vec![center]);
     }
 }

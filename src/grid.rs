@@ -3,7 +3,7 @@
 //! Algorithm: sort boxes by center Y, split into 3 triples (rows), sort
 //! each triple by X. Works for near-frontal shots — our case with the
 //! stand. With a heavily tilted camera, row clustering would be needed
-//! (see PLAN.md, "Pitfalls").
+//! (see PROJECT_NOTES.md, "Pitfalls").
 
 use crate::model::CLASS_COLORS;
 use crate::postprocess::Detection;
@@ -33,7 +33,7 @@ impl fmt::Display for FaceGrid {
 }
 
 /// Builds the grid from exactly 9 detections. Any other count is an error:
-/// silently producing garbage is not allowed (PLAN.md, "Pitfalls").
+/// silently producing garbage is not allowed (PROJECT_NOTES.md, "Pitfalls").
 pub fn build_grid(detections: &[Detection]) -> Result<FaceGrid> {
     if detections.len() != 9 {
         bail!(

@@ -27,7 +27,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database", type=Path, default=Path("samples/label_studio.sqlite3"))
     parser.add_argument(
-        "--labels", type=Path, default=Path("runs/detect/runs/detect/prelabels/labels")
+        "--labels", type=Path, default=Path("runs/detect/prelabels/labels")
     )
     parser.add_argument(
         "--output", type=Path, default=Path("samples/predictions/yolov8n-rocm-predictions.json")
