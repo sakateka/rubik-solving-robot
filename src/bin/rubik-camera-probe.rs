@@ -1,46 +1,17 @@
-//! Minimal verification of the Milk-V Duo camera path: GC2083 -> VI -> ISP.
-//!
-//! This binary intentionally stops before VPSS and TPU. A successful probe
-//! proves that the vendor sensor configuration and media-stack lifecycle work.
+//! Minimal verification of the Milk-V Duo camera path: GC2083 → VI → ISP → VPSS.
+
+#[cfg(feature = "cvi-camera")]
+#[path = "../camera.rs"]
+mod camera;
 
 #[cfg(feature = "cvi-camera")]
 use anyhow::{bail, Result};
 #[cfg(feature = "cvi-camera")]
+use camera::Camera;
+#[cfg(feature = "cvi-camera")]
 use clap::Parser;
 #[cfg(feature = "cvi-camera")]
-use std::{
-    ffi::{c_char, c_int, CStr, CString},
-    path::PathBuf,
-};
-
-#[cfg(feature = "cvi-camera")]
-#[repr(C)]
-struct RubikCameraFrameInfo {
-    width: u32,
-    height: u32,
-    pixel_format: u32,
-    stride: [u32; 3],
-    length: [u32; 3],
-}
-
-#[cfg(feature = "cvi-camera")]
-enum RubikCamera {}
-
-#[cfg(feature = "cvi-camera")]
-unsafe extern "C" {
-    fn rubik_camera_open(
-        sensor_config: *const c_char,
-        error: *mut c_char,
-        error_len: u32,
-    ) -> *mut RubikCamera;
-    fn rubik_camera_probe_frame(
-        camera: *mut RubikCamera,
-        info: *mut RubikCameraFrameInfo,
-        error: *mut c_char,
-        error_len: u32,
-    ) -> c_int;
-    fn rubik_camera_close(camera: *mut RubikCamera);
-}
+use std::{ffi::CString, fs::File, io::Write, path::PathBuf};
 
 #[cfg(feature = "cvi-camera")]
 #[derive(Parser)]
@@ -49,50 +20,71 @@ struct Cli {
     /// Path to the vendor sensor_cfg.ini (normally /mnt/data/sensor_cfg.ini)
     #[arg(long, default_value = "/mnt/data/sensor_cfg.ini")]
     sensor_config: PathBuf,
+
+    /// Crop the fixed cube ROI and resize it to 320x320 through VPSS
+    #[arg(long)]
+    vpss: bool,
+
+    /// VPSS frames to discard while sensor streaming and AE/AWB stabilize
+    #[arg(long, default_value_t = 10)]
+    warmup_frames: u32,
+
+    /// Save the VPSS RGB-planar output as a binary PPM image for inspection
+    #[arg(long)]
+    dump_ppm: Option<PathBuf>,
 }
 
 #[cfg(feature = "cvi-camera")]
-fn error_text(buffer: &[c_char]) -> String {
-    // The C adapter always writes a NUL-terminated diagnostic when it fails.
-    unsafe { CStr::from_ptr(buffer.as_ptr()) }
-        .to_string_lossy()
-        .into_owned()
+fn write_ppm(path: &PathBuf, planar_rgb: &[u8]) -> Result<()> {
+    let pixels = (camera::MODEL_WIDTH * camera::MODEL_HEIGHT) as usize;
+    if planar_rgb.len() != pixels * 3 {
+        bail!("unexpected VPSS RGB layout while writing PPM");
+    }
+    let mut output = File::create(path)?;
+    write!(
+        output,
+        "P6\n{} {}\n255\n",
+        camera::MODEL_WIDTH,
+        camera::MODEL_HEIGHT
+    )?;
+    for pixel in 0..pixels {
+        output.write_all(&[
+            planar_rgb[pixel],
+            planar_rgb[pixels + pixel],
+            planar_rgb[2 * pixels + pixel],
+        ])?;
+    }
+    Ok(())
 }
 
 #[cfg(feature = "cvi-camera")]
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    if cli.dump_ppm.is_some() && !cli.vpss {
+        bail!("--dump-ppm requires --vpss");
+    }
     let sensor_config = CString::new(cli.sensor_config.to_string_lossy().as_bytes())?;
-    let mut error = [0 as c_char; 256];
-    let camera = unsafe {
-        rubik_camera_open(
-            sensor_config.as_ptr(),
-            error.as_mut_ptr(),
-            error.len() as u32,
-        )
-    };
-    if camera.is_null() {
-        bail!("camera initialization failed: {}", error_text(&error));
+    let camera = Camera::open(&sensor_config)?;
+    if cli.vpss {
+        camera.warmup_vpss(cli.warmup_frames)?;
     }
-
-    let mut frame = RubikCameraFrameInfo {
-        width: 0,
-        height: 0,
-        pixel_format: 0,
-        stride: [0; 3],
-        length: [0; 3],
+    let frame = if let Some(path) = &cli.dump_ppm {
+        let (frame, rgb) = camera.capture_vpss_rgb()?;
+        write_ppm(path, &rgb)?;
+        eprintln!("wrote VPSS ROI to {}", path.display());
+        frame
+    } else {
+        camera.probe(cli.vpss)?
     };
-    let result = unsafe {
-        rubik_camera_probe_frame(camera, &mut frame, error.as_mut_ptr(), error.len() as u32)
-    };
-    unsafe { rubik_camera_close(camera) };
-    if result != 0 {
-        bail!("camera frame capture failed: {}", error_text(&error));
-    }
 
     println!(
-        "VI frame: {}x{}, pixel_format={}, stride={:?}, length={:?}",
-        frame.width, frame.height, frame.pixel_format, frame.stride, frame.length
+        "{} frame: {}x{}, pixel_format={}, stride={:?}, length={:?}",
+        if cli.vpss { "VPSS" } else { "VI" },
+        frame.width,
+        frame.height,
+        frame.pixel_format,
+        frame.stride,
+        frame.length
     );
     Ok(())
 }

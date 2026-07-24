@@ -17,7 +17,7 @@ lld=$(command -v ld.lld || true)
 for required in "$cc" "$tpu_sdk_root/include/cviruntime.h" \
                 "$tpu_sdk_root/lib/libcviruntime.so" "$tpu_sdk_root/lib/libcvikernel.so" \
                 "$mpi_root/include/cvi_vi.h" "$mpi_root/sample/common/sample_comm.h" \
-                "$mpi_root/lib/libcvi_ispd2.so" "$mpi_root/lib/libcvi_bin.so" \
+                "$mpi_root/lib/libcvi_bin.so" "$mpi_root/lib/libcvi_bin_isp.so" \
                 "$mpi_root/lib/libsns_gc2083.so"; do
   if [[ ! -e "$required" ]]; then
     echo "Missing prerequisite: $required" >&2

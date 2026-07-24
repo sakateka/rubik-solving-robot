@@ -83,11 +83,11 @@ fn main() {
         "vo",
         "gdc",
         "cvi_bin",
+        "cvi_bin_isp",
         "af",
         "ae",
         "awb",
         "isp_algo",
-        "cvi_ispd2",
         "sns_gc2083",
     ] {
         println!("cargo:rustc-link-lib=dylib={lib}");
@@ -95,5 +95,7 @@ fn main() {
     println!("cargo:rustc-link-search=native={mpi_lib_dir}/3rd");
     println!("cargo:rustc-link-lib=static=ini");
     println!("cargo:rustc-link-lib=dylib=pthread");
-    println!("cargo:rustc-link-lib=dylib=atomic");
+    // The board image does not provide libatomic.so; include the tiny GCC
+    // atomic runtime in the executable for libsys' byte-CAS helper.
+    println!("cargo:rustc-link-lib=static=atomic");
 }

@@ -7,6 +7,7 @@ The released PyTorch, ONNX and CV181X BF16 model files are described in
 [`models/README.md`](models/README.md).
 The engineering decisions, reproducible commands and deployment notes are in
 [`PROJECT_NOTES.md`](PROJECT_NOTES.md).
+Contribution and FFI safety rules are in [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Checkout
 

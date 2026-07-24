@@ -126,6 +126,43 @@ pub fn cube_roi_resize(img: &RgbImage, size: usize) -> anyhow::Result<Letterbox>
     })
 }
 
+/// Converts the VPSS output directly to the TPU input tensor.
+///
+/// VPSS has already applied the exact training crop `(464, 32)..(1296, 864)`
+/// and resized it to 320×320 RGB planar (CHW).  The only remaining operation
+/// is u8 → fp32 normalization.  Keeping this separate from `cube_roi_resize`
+/// makes it explicit that camera inference does not resize a frame twice.
+#[cfg_attr(not(feature = "cvi-camera"), allow(dead_code))]
+pub fn cube_roi_vpss_rgb(planar_rgb: &[u8]) -> anyhow::Result<Letterbox> {
+    let size = model_size();
+    let plane = size * size;
+    if planar_rgb.len() != 3 * plane {
+        anyhow::bail!(
+            "VPSS RGB buffer has {} bytes, expected {}",
+            planar_rgb.len(),
+            3 * plane
+        );
+    }
+    let data = planar_rgb
+        .iter()
+        .map(|&pixel| pixel as f32 / 255.0)
+        .collect();
+    let (left, top, right, _) = CUBE_ROI;
+    Ok(Letterbox {
+        data,
+        size,
+        scale: size as f32 / (right - left) as f32,
+        pad_x: 0.0,
+        pad_y: 0.0,
+        origin_x: left as f32,
+        origin_y: top as f32,
+    })
+}
+
+fn model_size() -> usize {
+    crate::model::INPUT_SIZE
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,5 +214,28 @@ mod tests {
         let original = roi.to_original(&det);
         assert_eq!(original.x, 880.0);
         assert_eq!(original.y, 448.0);
+    }
+
+    #[test]
+    fn vpss_tensor_is_chw_and_uses_cube_roi_mapping() {
+        let mut rgb = vec![0; 3 * 320 * 320];
+        rgb[0] = 255;
+        rgb[320 * 320] = 128;
+        let input = cube_roi_vpss_rgb(&rgb).unwrap();
+        assert_eq!(input.data[0], 1.0);
+        assert_eq!(input.data[320 * 320], 128.0 / 255.0);
+        assert_eq!(
+            input
+                .to_original(&Detection {
+                    x: 160.0,
+                    y: 160.0,
+                    w: 32.0,
+                    h: 32.0,
+                    class_id: 0,
+                    confidence: 1.0,
+                })
+                .x,
+            880.0
+        );
     }
 }

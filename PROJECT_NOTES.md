@@ -1,10 +1,75 @@
 # Проектные заметки: распознавание грани кубика Рубика (Rust + YOLO)
 
-**Цель:** приложение на Rust, которое получает кадр с камеры, находит грань
-кубика Рубика и определяет цвета 9 стикеров.
-**Первый майлстоун:** одна грань → вывод результата текстом.
+**Цель:** автономный механизированный решатель кубика Рубика. Стенд с восемью
+сервоприводами удерживает кубик, переориентирует его и крутит грани; камера и
+TPU распознают цвета; Rust solver строит решение; controller передаёт движения
+приводам.
+**Первый майлстоун:** одна грань → девять цветов в правильном порядке.
 **Целевое устройство:** Milk-V Duo 256M (SoC SG2002, RISC-V C906 @ 1 ГГц,
 256 МБ RAM), камера GC2083 2 МП (MIPI CSI, официальный модуль Milk-V).
+
+---
+
+## Система целиком: от камеры до решённого куба
+
+```text
+стенд (8 servo)
+       │  фиксированная поза куба для каждого scan
+       ▼
+camera → VPSS/YOLO → Face { 9 цветов row-major }
+                         │
+                         ▼
+              CubeState { U, R, F, D, L, B } → facelet string
+                         │
+                         ▼
+                  Rust solver → последовательность ходов
+                         │
+                         ▼
+             motion planner → команды четырём захватам и четырём приводам граней
+                         │
+                         ▼
+                    решённый куб
+```
+
+### Контракт между подсистемами
+
+Vision не является целью само по себе и не выдаёт «набор боксов» наружу.
+Его результат — ровно одна грань:
+
+```text
+Face: [top-left, top-middle, top-right,
+       middle-left, center, middle-right,
+       bottom-left, bottom-middle, bottom-right]
+```
+
+Это row-major порядок кадра камеры. Боксы и их координаты нужны только
+внутри vision, чтобы отсортировать девять стикеров. Координаты исходного
+1920×1080 кадра не являются частью API и не нужны solver или механике.
+
+Для state solver недостаточно шести безымянных `Face`: при каждом scan должна
+быть известна **поза стенда** и, следовательно, какая логическая грань (`U`,
+`R`, `F`, `D`, `L`, `B`) смотрит в камеру и как camera row-major ориентирован
+относительно неё. Это будет явной таблицей `scan pose → face + rotation`, а не
+догадкой по картинке. Центры граней зададут соответствие физических цветов
+буквам граней; после этого шесть `Face` собираются в facelet string ровно в
+порядке, который требует выбранная Rust-библиотека solver.
+
+Механика разделяется на два уровня:
+
+1. **Motion planner** знает кинематику стенда: как четырьмя приводами захватов
+   привести куб к требуемой позе и как четырьмя приводами граней выполнить
+   `U`, `R`, `F` и их обратные/двойные ходы.
+2. **Actuator driver** переводит безопасные команды planner в PWM/serial/I²C
+   команды сервоприводов, ждёт завершения и возвращает ошибку при timeout.
+
+Экран — необязательный observer: он показывает состояние scan/solve/execute,
+прогресс и диагностическую ошибку. Он не должен быть частью логики решения и
+не должен блокировать движение или распознавание.
+
+Ближайшая программная граница после camera scan: ввести типы `StickerColor`,
+`Face`, `CubeState`, таблицу scan poses и адаптер конкретной Rust-библиотеки
+solver. Управление реальными servo следует подключать после того, как state и
+последовательность ходов можно детерминированно проверить без механики.
 
 ---
 
@@ -1119,3 +1184,321 @@ VI frame: 1920x1080, pixel_format=..., stride=[...], length=[...]
 Этот шаг проверяет только сенсор и lifecycle vendor media stack. После него
 следующая работа — подключить VPSS и получить аппаратно cropped/resized
 320×320 ROI, затем сравнить его preprocessing с уже проверенным PNG path.
+
+### 10.19. Dynamic-linker зависимости media stack
+
+Первый `rubik-camera-probe` на Duo не стартовал: musl loader сообщил много
+ошибок relocation, например `isp_algo_clut_init: symbol not found` для
+`libisp.so`, а также `__atomic_compare_exchange_1` для `libsys.so`.
+
+Причина не в сенсоре и не в camera API. Rust передаёт LLD флаг
+`--as-needed`; SDK-библиотеки CVI при этом не всегда описывают свои
+транзитивные зависимости через ELF `DT_NEEDED`. LLD выкинул из executable
+необходимые поставщики symbols. Это видно через:
+
+```bash
+readelf -d target/riscv64gc-unknown-linux-musl/release/rubik-camera-probe
+```
+
+Например, `nm -D` подтвердил конкретные связи:
+
+```text
+libisp.so       → isp_algo_clut_init       → libisp_algo.so
+libcvi_bin.so   → cvi_compress2/JSON_*     → libcvi_bin_isp.so
+libcvi_bin.so   → VO/VPSS helpers          → libvo.so/libvpss.so
+```
+
+Исправление в `scripts/duo-linker.sh` заменяет rustc-флаг
+`-Wl,--as-needed` на `-Wl,--no-as-needed`, поэтому все явно названные в
+`build.rs` CVI libraries остаются в final ELF. `libatomic` меняется на
+статическую зависимость, поскольку в образе нет отдельной `libatomic.so`.
+
+После повторной сборки:
+
+```bash
+scripts/build-duo.sh
+readelf -d target/riscv64gc-unknown-linux-musl/release/rubik-camera-probe | rg NEEDED
+```
+
+ELF содержит `libvi.so`, `libisp.so`, `libsys.so`, `libvpss.so`, `libvo.so`,
+`libgdc.so`, `libcvi_bin.so`, `libcvi_bin_isp.so`, `libaf.so`, `libae.so`,
+`libawb.so`, `libisp_algo.so` и `libsns_gc2083.so`. Это соответствует
+библиотекам установленного на Duo media stack.
+
+### 10.20. Первый успешный захват GC2083
+
+После правки dynamic dependencies `rubik-camera-probe` успешно запустился на
+Duo с:
+
+```bash
+./rubik-camera-probe --sensor-config /mnt/data/sensor_cfg.ini
+```
+
+`sensor_cfg.ini` корректно описывает фактический модуль:
+
+```text
+GCORE_GC2083_MIPI_2M_30FPS_10BIT
+bus_id=2, i2c address=0x37, mipi_dev=0, lanes=1,0,2
+```
+
+Финальный результат probe:
+
+```text
+VI frame: 1920x1080, pixel_format=19, stride=[1920, 1920, 0],
+length=[2073600, 1036800, 0]
+```
+
+То есть путь `GC2083 → VI → ISP → VI frame` работает. Две плоскости имеют
+размеры `1920×1080` и `1920×540`; это Y + interleaved chroma, а не готовый
+RGB tensor модели. VPSS на следующем шаге выполнит crop/resize и
+преобразование формата.
+
+Во время ISP init обнаружен важный mismatch tuning data:
+
+```text
+mwSns:2083 != pqBinSns:2053
+```
+
+Драйвер сенсора верный (GC2083). В исходнике SDK эта проверка только печатает
+diagnostic и затем намеренно возвращает `CVI_SUCCESS`: она не отменяет
+загрузку PQBIN и не переключает сенсор. Поэтому mismatch сам по себе не
+объясняет ошибку и не блокирует следующий VPSS этап. Однако он остаётся
+поводом отдельно проверить tuning data перед финальной оценкой цветопередачи.
+
+Фактический default path не `/mnt/data`, а
+`/mnt/cfg/param/cvi_sdr_bin` (задан в `cvi_mpi/modules/bin/src/cvi_bin.c`).
+Следующая диагностика на плате:
+
+```bash
+ls -lah /mnt/cfg/param
+```
+
+Проверка на устройстве подтвердила корректную установку:
+
+```text
+/mnt/cfg/param/cvi_sdr_bin -> cvi_sdr_bin_GC2083
+/mnt/cfg/param/cvi_sdr_bin_GC2083
+```
+
+Значит файл, который реально открывает middleware, соответствует GC2083.
+Надпись `pqBinSns:2053` — несогласованная metadata общего PQBIN (в нём
+заявлено несколько сенсорных профилей), а не выбор GC2053-файла. Этот вопрос
+закрыт; дальнейший VPSS этап можно выполнять с текущей конфигурацией.
+
+### 10.21. VPSS crop/resize probe
+
+Следующий инкремент не соединяет VPSS с TPU: сначала подтверждаем сам
+аппаратный преобразователь кадров. В `rubik-camera-probe` добавлен флаг
+`--vpss`, который после VI/ISP init поднимает VPSS group `0`, привязывает к
+ней `VI pipe 0 / channel 0`, получает один output frame и освобождает его.
+
+Конфигурация намеренно в точности повторяет preprocessing обучающего набора:
+
+```text
+input:  1920×1080 NV21 из VI
+crop:   x=464, y=32, width=832, height=832  (absolute group crop)
+resize: 832×832 → 320×320
+output: RGB planar, 8-bit, без aspect padding, mirror и flip
+```
+
+RGB planar здесь ещё не FP32 tensor: это три 8-bit плоскости R, G, B в
+аппаратной памяти. На следующем шаге нужно проверить порядок каналов и
+значения относительно известного PNG pipeline, затем нормализовать `/255`
+для входа модели.
+
+Сборка и host-проверки после добавления прошли:
+
+```bash
+scripts/build-duo.sh
+cargo test
+```
+
+На Duo нужно скопировать новый `rubik-camera-probe` и выполнить:
+
+```bash
+export LD_LIBRARY_PATH=/mnt/system/lib:/mnt/system/usr/lib:/mnt/system/usr/lib/3rd
+./rubik-camera-probe --sensor-config /mnt/data/sensor_cfg.ini --vpss
+```
+
+Ожидаемый результат: `VPSS frame: 320x320` с тремя заполненными plane
+length/stride и pixel format, соответствующим `PIXEL_FORMAT_RGB_888_PLANAR`.
+
+### 10.22. Правило `unsafe` для Rust/FFI
+
+В проект добавлен `CONTRIBUTING.md` с правилом: scope `unsafe` должен быть
+минимальным. Application code не работает с raw pointers и не вызывает CVI C
+API напрямую. FFI изолируется в небольшом safe Rust wrapper; каждый
+`unsafe` block обязан иметь `SAFETY:` comment с инвариантами lifetime,
+ownership, alignment и ABI.
+
+`rubik-camera-probe` приведён к этому правилу: `main` использует только
+`Camera::open()` и `camera.probe()`. Opaque C handle хранится в `NonNull`,
+закрывается через `Drop`, а три FFI calls остаются в wrapper с локальными
+`unsafe` blocks. Таким образом ни raw pointer, ни ручной вызов close не могут
+утечь в верхнюю логику приложения.
+
+### 10.23. AWB сообщение при shutdown ISP
+
+После успешного получения VI/VPSS frame middleware печатает:
+
+```text
+E isp isp_3aLib_exit:621 type 2 registered awb lib can't init
+```
+
+Это происходит при shutdown, а не при захвате: `rubik_camera_close` вызывает
+штатный `SAMPLE_COMM_VI_DestroyIsp`, тот — `CVI_ISP_Exit`, а внутри него
+`isp_3aLib_exit(..., AAA_TYPE_AWB)`. Исходник CV181X показывает, что сообщение
+печатается, когда у зарегистрированной AWB-библиотеки отсутствует callback
+`pfn_awb_exit`. Оно возникает **до** `CVI_AWB_UnRegister`, поэтому это не
+double-unregister и не ошибка нашего `Drop`/FFI ownership.
+
+Для текущего one-shot probe это non-fatal vendor teardown warning: frame уже
+получен и все нужные операции выполнены. Cleanup пропускать нельзя — он
+освобождает ISP/VI/VB ресурсы. В production camera process модель и ISP будут
+открываться один раз и жить весь процесс, поэтому этот путь выполняется лишь
+при нормальном завершении. Перед выпуском нужно дополнительно проверить
+несколько start/stop циклов в одном процессе; если ошибка нарушит re-init,
+искать workaround следует в vendor AWB/ISP SDK, а не удалять cleanup.
+
+### 10.24. Frame-based warm-up перед первым захватом
+
+Первый `cube-roi.ppm`, снятый сразу после VPSS start, проверен на хосте:
+
+```text
+320×320 PPM, 307200 pixel bytes
+min=0, max=0, mean=0, 100% bytes are zero
+```
+
+Это не просто слабое освещение: весь кадр нулевой. Уже существующий shell
+workflow с `sample_sensor_test` требовал паузы перед захватом, поэтому причина
+— ранний frame до того, как sensor streaming и AE/AWB успели стабилизироваться.
+
+Вместо time-based `sleep` в `rubik-camera-probe` добавлен frame-based warm-up:
+после запуска и bind VPSS получает и освобождает первые output frames. Это
+надёжнее sleep: приложение ожидает именно
+реальные кадры pipeline, а не просто истечение wall-clock времени. Флаг:
+
+```text
+--warmup-frames <N>    # default: 10; use 0 only for diagnostics
+```
+
+Проверка серии из `images/ppms/` установила нижнюю границу. Семь независимых
+кадров с `1f` были полностью нулевыми (`100%` bytes равны нулю), тогда как
+все четыре захвата с `2f` уже были валидными; `3f`, `5f`, `10f`, `15f`, `30f`,
+`60f` и `90f` также валидны. Таким образом, технический минимум на текущем
+стенде — 2 frames. Default выбран `10`: это пятикратный запас к наблюдаемому
+порогу и около 333 ms однократной задержки при 30 FPS.
+
+Повторный визуальный контроль запускается так:
+
+```bash
+./rubik-camera-probe \
+  --sensor-config /mnt/data/sensor_cfg.ini \
+  --vpss \
+  --warmup-frames 10 \
+  --dump-ppm /mnt/storage/cube-roi-warm.ppm
+```
+
+В production pipeline warm-up выполняется один раз при старте camera process,
+перед первым inference; на steady-state latency он не влияет.
+
+### 10.25. Сквозной one-shot scan с камеры
+
+`rubik-scan` теперь принимает ровно один source: либо `--image <file>`, либо
+`--camera`. Камерный режим разрешён только вместе с `--cvimodel`: CPU/Candle
+backend и stub остаются инструментами для файлового прототипа.
+
+Камерный путь не декодирует PNG и не использует `image` для resize:
+
+```text
+GC2083 → VI/ISP → VPSS crop(464,32,832,832) + resize(320,320)
+       → RGB planar u8 (CHW) → Rust: fp32 / 255 → CVI TPU
+       → confidence filter → ROI filter → NMS → grid 3×3
+```
+
+`src/camera.rs` — единственное Rust-место с C FFI камеры. `Camera` владеет
+opaque handle через `NonNull` и закрывает media pipeline в `Drop`.
+`rubik-camera-probe` использует тот же module, поэтому probe и production
+одинаково получают frame из VPSS. `preprocess::cube_roi_vpss_rgb()` только
+нормализует байты; повторного crop/resize нет. `Letterbox` пока сохраняет
+преобразование координат для отладки file pipeline, но camera-domain contract
+от него не зависит: grid строится в model-space и наружу нужен только
+row-major порядок девяти цветов.
+
+Команда для проверки на плате после копирования нового `rubik-scan` и модели:
+
+```bash
+export LD_LIBRARY_PATH=/mnt/system/lib:/mnt/system/usr/lib:/mnt/system/usr/lib/3rd
+./rubik-scan \
+  --camera \
+  --sensor-config /mnt/data/sensor_cfg.ini \
+  --warmup-frames 10 \
+  --cvimodel cube_yolov8n_320_bf16.cvimodel \
+  --conf 0.5 \
+  --iou 0.5 \
+  --timings
+```
+
+`frame` в `timings_ms` для camera run включает init VI/ISP/VPSS, warm-up и
+один захват. `preprocess` — только RGB u8 → normalized fp32 CHW. На следующем
+этапе нужно измерить именно повторные scans в одном живущем процессе; текущая
+CLI-команда намеренно one-shot и потому включает start-up стоимость.
+
+### 10.26. Первый сквозной camera → TPU → Face scan
+
+На Milk-V Duo успешно выполнен production path, без промежуточного файла:
+
+```bash
+./rubik-scan \
+  --camera \
+  --sensor-config /mnt/data/sensor_cfg.ini \
+  --warmup-frames 10 \
+  --cvimodel cube_yolov8n_320_bf16.cvimodel \
+  --conf 0.5 \
+  --iou 0.5 \
+  --timings
+```
+
+Результат — 9 detections и корректно собранная грань:
+
+```text
+W B Y
+O R G
+O W G
+
+compact: WBYORGOWG
+```
+
+Измерение one-shot run:
+
+```text
+frame=2021.82 ms  preprocess=11.74 ms  model_load=34.22 ms
+inference=41.07 ms  postprocess=0.28 ms  total=2229.83 ms
+```
+
+`frame` включает vendor init и 10 warm-up frames, поэтому ~2.0 s — не
+ограничение TPU. В steady state существенны прежде всего `preprocess +
+inference + postprocess` (около 53 ms при уже запущенных camera и model).
+`model_load` тоже уйдёт из hot path, когда cvimodel будет открыт один раз.
+
+### 10.27. Механическая схема стенда
+
+Стенд представляет собой квадратную рамку с кубом в центре и четырьмя
+позициями захватов по сторонам окна. На каждой позиции два привода:
+
+1. **Rail servo** через шестерню перемещает направляющую с захватом по рельсе
+   к кубу и от него.
+2. **Wrist servo** вращает П-образный захват вокруг его рабочей оси.
+
+Итого восемь servo: четыре линейно подводят/отводят захваты и четыре задают
+поворот соответствующего захвата. Чтобы повернуть, например, левую или
+правую грань, противоположная пара захватов удерживает куб в нужной позе, а
+захват целевой стороны вращает только соответствующий слой. Для camera scan
+куб устанавливается в фиксированную позу внутри квадратного окна.
+
+Это определяет будущий API motion planner: не «PWM 1470 µs», а атомарные
+безопасные действия вроде `grip(North)`, `release(East)`,
+`rotate_face(Right, QuarterTurn)` и `move_to_scan_pose(PoseId)`. Реальный
+servo driver будет реализацией этих действий после калибровки границ рельс,
+углов wrist и безопасной последовательности захватов. До подключения железа
+planner можно тестировать как state machine на симуляторе поз куба.
