@@ -12,12 +12,18 @@ cvi-runtime = []
 # cvi-runtime because both features are only meaningful in the Duo cross-build.
 cvi-camera = ["cvi-runtime"]
 
+[[bin]]
+name = "rubik-camera-probe"
+path = "src/bin/rubik-camera-probe.rs"
+required-features = ["cvi-camera"]
+
 [dependencies]
 anyhow = "1"
 candle-core = { version = "0.11.0", default-features = false }
 candle-nn = { version = "0.11.0", default-features = false }
 clap = { version = "4", features = ["derive"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+min2phase = { git = "https://github.com/cs0x7f/min2phase_rust.git", rev = "56ce7d4f65b0d2cc49496c43a7ddfff094b227c1" }
 
 [build-dependencies]
 cc = "1"

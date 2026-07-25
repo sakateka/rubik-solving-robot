@@ -39,6 +39,7 @@ enum RawCamera {}
 /// Owns one initialized GC2083 → VI → ISP → VPSS pipeline.
 pub struct Camera(NonNull<RawCamera>);
 
+#[link(name = "rubik_cvi_camera", kind = "static")]
 unsafe extern "C" {
     fn rubik_camera_open(
         sensor_config: *const c_char,

@@ -255,11 +255,6 @@ mod tests {
         let input = Letterbox {
             data: vec![0.0; 3 * INPUT_SIZE * INPUT_SIZE],
             size: INPUT_SIZE,
-            scale: 1.0,
-            pad_x: 0.0,
-            pad_y: 0.0,
-            origin_x: 0.0,
-            origin_y: 0.0,
         };
         let _ = img; // the blank tensor above stands in for a real frame here
         let detector =

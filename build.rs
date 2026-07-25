@@ -11,6 +11,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=CVI_MPI_ISP_INCLUDE");
     println!("cargo:rerun-if-env-changed=CVI_MPI_COMMON_INCLUDE");
     println!("cargo:rerun-if-env-changed=CVI_MPI_LIB_DIR");
+    println!("cargo:rerun-if-env-changed=CVI_TOOLCHAIN_ATOMIC_LIB_DIR");
 
     // The normal PC build deliberately has no dependency on the vendor SDK.
     if std::env::var_os("CARGO_FEATURE_CVI_RUNTIME").is_none() {
@@ -97,5 +98,8 @@ fn main() {
     println!("cargo:rustc-link-lib=dylib=pthread");
     // The board image does not provide libatomic.so; include the tiny GCC
     // atomic runtime in the executable for libsys' byte-CAS helper.
+    let atomic_lib_dir = std::env::var("CVI_TOOLCHAIN_ATOMIC_LIB_DIR")
+        .expect("CVI_TOOLCHAIN_ATOMIC_LIB_DIR must point to the target libatomic.a directory");
+    println!("cargo:rustc-link-search=native={atomic_lib_dir}");
     println!("cargo:rustc-link-lib=static=atomic");
 }

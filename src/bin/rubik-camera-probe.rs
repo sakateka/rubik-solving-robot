@@ -1,19 +1,10 @@
 //! Minimal verification of the Milk-V Duo camera path: GC2083 → VI → ISP → VPSS.
 
-#[cfg(feature = "cvi-camera")]
-#[path = "../camera.rs"]
-mod camera;
-
-#[cfg(feature = "cvi-camera")]
 use anyhow::{bail, Result};
-#[cfg(feature = "cvi-camera")]
-use camera::Camera;
-#[cfg(feature = "cvi-camera")]
 use clap::Parser;
-#[cfg(feature = "cvi-camera")]
+use rubik_scan::camera::{self, Camera};
 use std::{ffi::CString, fs::File, io::Write, path::PathBuf};
 
-#[cfg(feature = "cvi-camera")]
 #[derive(Parser)]
 #[command(about = "Probe GC2083 through the CVI VI/ISP media stack")]
 struct Cli {
@@ -34,7 +25,6 @@ struct Cli {
     dump_ppm: Option<PathBuf>,
 }
 
-#[cfg(feature = "cvi-camera")]
 fn write_ppm(path: &PathBuf, planar_rgb: &[u8]) -> Result<()> {
     let pixels = (camera::MODEL_WIDTH * camera::MODEL_HEIGHT) as usize;
     if planar_rgb.len() != pixels * 3 {
@@ -57,7 +47,6 @@ fn write_ppm(path: &PathBuf, planar_rgb: &[u8]) -> Result<()> {
     Ok(())
 }
 
-#[cfg(feature = "cvi-camera")]
 fn main() -> Result<()> {
     let cli = Cli::parse();
     if cli.dump_ppm.is_some() && !cli.vpss {
@@ -87,10 +76,4 @@ fn main() -> Result<()> {
         frame.length
     );
     Ok(())
-}
-
-#[cfg(not(feature = "cvi-camera"))]
-fn main() {
-    eprintln!("rubik-camera-probe requires --features cvi-camera in a Duo cross-build");
-    std::process::exit(2);
 }

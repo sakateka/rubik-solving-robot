@@ -5,8 +5,6 @@
 //!
 //! Stage 1: PC prototype, reads a photo from disk.
 
-#[cfg(feature = "cvi-camera")]
-mod camera;
 mod capture;
 mod grid;
 mod model;
@@ -19,6 +17,8 @@ mod yolo_v8;
 use anyhow::{bail, Result};
 use clap::Parser;
 use model::Detector;
+#[cfg(feature = "cvi-camera")]
+use rubik_scan::camera;
 #[cfg(feature = "cvi-camera")]
 use std::ffi::CString;
 use std::{
@@ -107,7 +107,7 @@ fn main() -> Result<()> {
     // 2–3. The old PC prototype uses full-frame letterbox. The production TPU
     // model uses the exact crop→resize preprocessing from its training set.
     let (
-        input,
+        _input,
         detections,
         num_classes,
         use_center_window,
@@ -223,8 +223,6 @@ fn main() -> Result<()> {
         detections
     };
     let detections = postprocess::nms(detections, cli.iou);
-    // Only map coordinates after model-space filters have done their job.
-    let detections: Vec<_> = detections.iter().map(|d| input.to_original(d)).collect();
     let postprocess_time = phase_started.elapsed();
     println!("detections after NMS: {}", detections.len());
     for d in &detections {
@@ -241,9 +239,10 @@ fn main() -> Result<()> {
 
     // 5. 3x3 grid -> text (only makes sense for the 6-class cube model)
     if num_classes == 6 {
-        let face = grid::build_grid(&detections)?;
-        println!("{face}");
-        println!("compact: {}", face.to_compact_string());
+        let grid = grid::build_grid(&detections)?;
+        let face = grid.to_face()?;
+        println!("{grid}");
+        println!("compact: {}", face.compact());
     }
 
     if cli.timings {

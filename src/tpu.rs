@@ -21,6 +21,7 @@ struct RawTpu {
     _private: [u8; 0],
 }
 
+#[link(name = "rubik_cvi_tpu", kind = "static")]
 unsafe extern "C" {
     fn rubik_cvi_tpu_open(
         model_path: *const c_char,

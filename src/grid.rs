@@ -5,9 +5,9 @@
 //! stand. With a heavily tilted camera, row clustering would be needed
 //! (see PROJECT_NOTES.md, "Pitfalls").
 
-use crate::model::CLASS_COLORS;
-use crate::postprocess::Detection;
+use crate::{model::CLASS_COLORS, postprocess::Detection};
 use anyhow::{bail, Context, Result};
+use rubik_scan::cube::Face;
 use std::fmt;
 
 /// Recognized face: 3x3 color symbols ('W', 'Y', 'R', 'O', 'G', 'B').
@@ -20,6 +20,11 @@ impl FaceGrid {
     /// Will be useful for assembling the full cube state (URFDLB notation).
     pub fn to_compact_string(&self) -> String {
         self.cells.iter().flatten().collect()
+    }
+
+    /// Converts vision output into the domain type used by scan/solve code.
+    pub fn to_face(&self) -> Result<Face> {
+        Face::from_symbols(&self.to_compact_string())
     }
 }
 
@@ -102,6 +107,7 @@ mod tests {
         assert_eq!(face.cells[1], ['O', 'R', 'R']);
         assert_eq!(face.cells[2], ['G', 'B', 'O']);
         assert_eq!(face.to_compact_string(), "WWYORRGBO");
+        assert_eq!(face.to_face().unwrap().compact(), "WWYORRGBO");
     }
 
     #[test]

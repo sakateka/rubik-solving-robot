@@ -1491,10 +1491,26 @@ inference + postprocess` (около 53 ms при уже запущенных ca
 2. **Wrist servo** вращает П-образный захват вокруг его рабочей оси.
 
 Итого восемь servo: четыре линейно подводят/отводят захваты и четыре задают
-поворот соответствующего захвата. Чтобы повернуть, например, левую или
-правую грань, противоположная пара захватов удерживает куб в нужной позе, а
-захват целевой стороны вращает только соответствующий слой. Для camera scan
-куб устанавливается в фиксированную позу внутри квадратного окна.
+поворот соответствующего захвата. Типы и назначение осей различаются:
+
+| Оси | Servo | Механическая роль |
+| --- | --- | --- |
+| 4 wrist axes | **DSSERVO DS3218-180** (номинально 180°, 20 kg·cm) | Поворот П-образных захватов |
+| 4 rail axes | **TowerPro MG996R 180°** | Перемещение направляющих с захватами через шестерни |
+
+Чтобы повернуть, например, левую или правую грань, противоположная пара
+захватов удерживает куб в нужной позе, а захват целевой стороны вращает только
+соответствующий слой. Для camera scan куб устанавливается в фиксированную позу
+внутри квадратного окна.
+
+Все восемь каналов уже подключены к **PCA9685** — 16-channel 12-bit PWM
+driver по I²C. Будущий actuator driver на Duo будет писать в PCA9685 только
+калиброванные позиции, а не предполагать, что номинальные 0…180° безопасны
+для конкретного захвата/рельсы. До первого движения нужно получить для каждого
+канала минимум: I²C address, PCA9685 channel, безопасный pulse range,
+нейтральную позицию и направление. Силовое питание сервоприводов должно быть
+отдельным от питания Duo, но с общей GND; питание восьми DS3218 от 5V pin Duo
+или PCA9685 logic supply недопустимо.
 
 Это определяет будущий API motion planner: не «PWM 1470 µs», а атомарные
 безопасные действия вроде `grip(North)`, `release(East)`,
@@ -1502,3 +1518,67 @@ inference + postprocess` (около 53 ms при уже запущенных ca
 servo driver будет реализацией этих действий после калибровки границ рельс,
 углов wrist и безопасной последовательности захватов. До подключения железа
 planner можно тестировать как state machine на симуляторе поз куба.
+
+### 10.28. Solver core: `Face` → facelets → min2phase
+
+Для решения выбран уже использованный в отдельном Bevy-проекте
+[`sakateka/cube-solver`](https://github.com/sakateka/cube-solver) backend
+[`cs0x7f/min2phase_rust`](https://github.com/cs0x7f/min2phase_rust). Во
+встроенном проекте Bevy полезными оказались три проверенные идеи: facelet order
+`URFDLB`, remapping цветов через центры граней и стандартная нотация ходов
+Singmaster. Bevy/ECS и 3D model на Duo не нужны, поэтому в этом репозитории
+создан маленький platform-independent library crate `src/lib.rs` без Bevy,
+CVI или servo dependencies.
+
+`Cargo.toml` подключает min2phase напрямую из Git, не через crates.io, и
+закрепляет конкретную проверенную ревизию:
+
+```toml
+min2phase = { git = "https://github.com/cs0x7f/min2phase_rust.git",
+              rev = "56ce7d4f65b0d2cc49496c43a7ddfff094b227c1" }
+```
+
+`src/cube.rs` определяет:
+
+```text
+StickerColor       физический цвет: W/Y/R/O/G/B
+Face               ровно 9 цветов camera row-major
+ScanPose           logical face U/R/F/D/L/B + rotation камеры 0..3
+CubeState          шесть однократно записываемых отсканированных граней
+CubeMove            logical face + clockwise / counter-clockwise / half turn
+```
+
+`CubeState::facelet_string()` берёт центр каждой логической грани и строит
+mapping `StickerColor → U/R/F/D/L/B` из **текущего куба**. Он проверяет, что
+шесть центров различны и каждый физический цвет встретился ровно девять раз.
+Только после этого state передаётся min2phase. Поэтому solver не зависит от
+зашитого предположения о физической цветовой схеме куба.
+
+Для ручной проверки до автоматизации шести scan poses добавлен binary
+`rubik-solve`. Он принимает шесть 9-символьных строк в camera row-major
+порядке и, при необходимости, отдельное clockwise rotation `0..3` для каждой
+грани:
+
+```bash
+./rubik-solve \
+  --up WWWWWWWWW --right RRRRRRRRR --front GGGGGGGGG \
+  --down YYYYYYYYY --left OOOOOOOOO --back BBBBBBBBB
+```
+
+Для решённого куба он печатает:
+
+```text
+facelets: UUUUUUUUURRRRRRRRRFFFFFFFFFDDDDDDDDDLLLLLLLLLBBBBBBBBB
+solution:
+moves: []
+```
+
+`scripts/build-duo.sh` теперь также собирает `rubik-solve`. Тесты покрывают
+rotation camera face, facelet construction по центрам, неверный count цветов,
+парсинг `R`/`U'`/`F2` и инвариант `scramble → solve → apply_moves = solved`.
+
+Особенность upstream: первый вызов `min2phase::solve` строит статические
+lookup tables и печатает прогресс в stdout. Таблицы инициализируются один раз
+на процесс. В production runtime это нужно сознательно вызвать на этапе
+startup до UI/scan loop либо убрать вывод в отдельном upstream patch; это не
+часть inference или servo latency.

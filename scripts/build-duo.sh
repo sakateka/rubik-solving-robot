@@ -47,8 +47,11 @@ export CVI_MPI_SAMPLE_INCLUDE="$mpi_root/sample/common"
 export CVI_MPI_ISP_INCLUDE="$mpi_root/include/isp/cv181x"
 export CVI_MPI_COMMON_INCLUDE="$mpi_root/component/isp/common"
 export CVI_MPI_LIB_DIR="$mpi_root/lib"
+# GCC selects this exact multilib for riscv64gc / the Duo's Xthead ABI. Cargo
+# needs it explicitly when linking the package library target as well as bins.
+export CVI_TOOLCHAIN_ATOMIC_LIB_DIR="$toolchain_root/sysroot/lib64xthead/lp64d"
 export RUBIK_DUO_LLD_DIR="$lld_shim_dir"
 
 cd "$project_root"
 exec cargo build --release --target "$target" --features cvi-camera \
-  --bin rubik-scan --bin rubik-camera-probe "$@"
+  --bin rubik-scan --bin rubik-camera-probe --bin rubik-solve "$@"
