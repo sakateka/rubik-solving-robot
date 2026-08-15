@@ -1582,3 +1582,259 @@ lookup tables и печатает прогресс в stdout. Таблицы и�
 на процесс. В production runtime это нужно сознательно вызвать на этапе
 startup до UI/scan loop либо убрать вывод в отдельном upstream patch; это не
 часть inference или servo latency.
+
+### 10.29. PCA9685: обнаружение и read-only probe
+
+PCA9685 подключён к I²C1 реальной платы Duo:
+
+```text
+GP4 / physical pin 6  = IIC1_SCL → PCA SCL
+GP5 / physical pin 7  = IIC1_SDA → PCA SDA
+3.3V                  = PCA VCC (логика)
+GND                   = PCA GND и GND внешнего servo PSU
+external 5–6V         = PCA V+ (силовое питание servo)
+```
+
+Это подтверждено непосредственно на плате `duo-pinmux -r GP4` и
+`duo-pinmux -r GP5`. GP6–GP9 остаются свободны как SPI2 (`SCK`, `MOSI`,
+`MISO`, `CS`) для будущего status LCD.
+
+После подключения PCA к I²C1 read scan подтвердил:
+
+```text
+i2cdetect -y -r 1
+0x40 — индивидуальный address PCA9685
+0x70 — default All-Call address того же PCA9685
+```
+
+Read-only register check:
+
+```text
+MODE1    0x11  = SLEEP + ALLCALL
+MODE2    0x04  = push-pull outputs
+PRESCALE 0x1e  ≈ 196.9 Hz при номинальном oscillator 25 MHz
+```
+
+`SLEEP` означает, что PWM oscillator сейчас выключен; это безопасное состояние
+до калибровки. PRESCALE ещё не является настройкой для servo: для типичных
+50 Hz он позже будет программно изменён вместе с контролируемым выходом из
+sleep, но сейчас никаких I²C writes не выполняем.
+
+В проект добавлены feature `pca9685`, безопасный Linux `/dev/i2c-*` wrapper
+`src/pca9685.rs` и `rubik-servo-probe`. Он делает только три register reads,
+никакого API записи в нём нет:
+
+```bash
+./rubik-servo-probe --i2c-device /dev/i2c-1 --address 0x40
+```
+
+Проверка на плате успешно прошла:
+
+```text
+PCA9685 device=/dev/i2c-1 address=0x40
+MODE1=0x11 sleep=true auto_increment=false all_call=true
+MODE2=0x04 output_driver=push-pull
+PRESCALE=0x1e estimated_pwm_hz=196.89
+writes=0 (read-only probe)
+```
+
+`scripts/build-duo.sh` собирает этот binary вместе с scanner, camera probe и
+solver CLI.
+
+### 10.30. PCA9685: безопасная настройка PWM 50 Hz
+
+Следующий binary `rubik-servo-init` задаёт период PWM для будущего servo
+control, но не задаёт pulse ни одному каналу. Перед пробуждением PCA он
+записывает global `ALL_LED_*` state `full-off` для всех 16 outputs, затем
+ставит prescale и только после этого выходит из sleep. Для 50 Hz nominal
+25 MHz oscillator даёт `PRESCALE=0x79` и оценочную частоту `50.029 Hz`.
+
+Запуск на Duo намеренно требует явного acknowledgement:
+
+```bash
+./rubik-servo-init \
+  --i2c-device /dev/i2c-1 \
+  --address 0x40 \
+  --pwm-hz 50 \
+  --confirm-safe-output-state
+```
+
+Ожидаемый итог:
+
+```text
+PRESCALE=0x79 estimated_pwm_hz=50.029
+outputs=all_off; no servo pulse was emitted
+```
+
+Команда успешно выполнена на реальной плате; PCA9685 принял `PRESCALE=0x79`
+и сообщил `50.029 Hz`.
+
+Это ещё не calibration и не motion control. Следующий этап начнётся только
+после таблицы `PCA channel → servo axis` и безопасных pulse limits для каждой
+из восьми механических осей.
+
+### 10.31. Фиксированная карта PCA9685 → механика стенда
+
+Физическое подключение каналов PCA9685 уже известно и зафиксировано в
+`src/stand.rs`; это единственный источник mapping для будущих calibration и
+motion planner:
+
+| PCA channel | Axis |
+|---:|---|
+| 0 | right gripper |
+| 1 | bottom gripper |
+| 2 | top gripper |
+| 3 | left gripper |
+| 4 | top rail |
+| 5 | left rail |
+| 6 | bottom rail |
+| 7 | right rail |
+
+Channels 0–3 управляют поворотом P-shaped захватов (DS3218-180), а 4–7 —
+линейным перемещением направляющих (MG996R). Mapping не определяет
+направление движения, нейтраль, крайние положения или допустимый диапазон
+impulse width: эти параметры будут измерены отдельно для каждой оси.
+
+### 10.32. Поканальная calibration без одновременного движения осей
+
+`rubik-servo-calibrate` принимает имя axis, pulse width и ограниченное время
+удержания. До включения выбранного канала он ставит `full-off` на всех 16
+individual channels PCA и ставит выбранный channel активным последним. По
+завершении hold interval он снова ставит все individual channels в `full-off`.
+
+Первый hardware sweep выявил bug ранней версии: global `ALL_LED_OFF_H`
+использовался как runtime output gate. При pulse 1500 us registers показали
+`LED0_OFF_L=0x33`, но `LED0_OFF_H=0x00` вместо ожидаемого `0x01`: терялся
+старший bit 12-bit PWM counter. Исправленная версия neutralizes `ALL_LED_*`
+только при остановленном oscillator; runtime safety обеспечивают individual
+`LEDn_OFF_H.full-off` bits.
+
+Проверка right-gripper после исправления: три одинаковые команды `400 us`
+на 1000 ms изменили положение только при первом вызове; два следующих не
+сдвинули вал и не дали посторонних звуков. Это подтверждает position control,
+а не continuous rotation. Свободный ход вала на отключённом servo сам по себе
+не задаёт controllable travel. Для DSSERVO DS3218-180 номинальный PWM ход —
+180°; фактические рабочие poses нужно измерять на assembled stand.
+
+Тот же тест выполнен для всех четырёх gripper axes: right, bottom, top и
+left. На каждой подтверждён exploratory диапазон `400..=2600 us` без
+посторонних звуков и без заметного упора. Сам инструмент допускает
+exploratory `300..=2800 us` только с `--allow-out-of-spec-pulse`.
+Номинальный DS3218-180 диапазон
+остаётся `500..=2500 us` для 180°; выход за него допускается только через
+явный calibration flag. Для DS3218 project working range зафиксирован как
+`400..=2700 us`; именно в нём будут определяться финальные именованные poses
+каждой оси.
+
+Для всех четырёх MG996R rail axes (`top`, `left`, `bottom`, `right`) pulse
+`2500 us` проверен как безопасная позиция. В будущей servo configuration это
+будет исходная pose `far/open`, при условии что она соответствует отведённым
+от куба захватам. Именно из неё следует начинать homing/startup sequence.
+
+Захваты имеют подпружиненные щёчки. Рабочая позиция всех четырёх rail axes:
+`near/grip = 1200 us`. Эта pose подводит захваты к кубу для удержания;
+базовая операция рельсы: `far/open (2500) ↔ near/grip (1200)`.
+
+Универсальные имена gripper orientations задаются относительно стороны рамы,
+на которой установлен захват:
+
+```text
+frame_parallel               — вдоль своей стороны рамы
+frame_perpendicular          — поперёк стороны рамы, поворот на 90°
+frame_parallel_reversed      — вдоль рамы, поворот на 180°
+```
+
+Калибровка gripper poses:
+
+```text
+left-gripper.frame_parallel          = 400 us
+left-gripper.frame_perpendicular     = 1450 us
+left-gripper.frame_parallel_reversed = 2450 us
+right-gripper.frame_parallel          = 450 us
+right-gripper.frame_perpendicular     = 1500 us
+right-gripper.frame_parallel_reversed = 2500 us
+top-gripper.frame_parallel            = 400 us
+top-gripper.frame_perpendicular       = 1450 us
+top-gripper.frame_parallel_reversed   = 2450 us
+bottom-gripper.frame_parallel          = 400 us
+bottom-gripper.frame_perpendicular     = 1450 us
+bottom-gripper.frame_parallel_reversed = 2500 us
+```
+
+Для всех осей калибратор использует единый проверенный exploratory range
+`400..=2800 us`. Как и раньше, значения вне documented `500..=2500 us`
+требуют явного `--allow-out-of-spec-pulse`.
+
+Поведение после PCA `outputs=all_off` различается по типу servo: DS3218
+захватов при включённом `V+` продолжают удерживать последнюю позицию даже без
+PWM input, тогда как MG996R рельс становятся back-drivable. Следовательно,
+`full-off` означает «PCA не посылает pulse», но не «servo обесточен» и не
+универсальный mechanical release. Полное снятие torque с DS3218 потребует
+отдельного power switch на servo `V+`; текущая плата PCA9685 этого не делает.
+
+Первый тест любой оси — короткая команда около середины диапазона:
+
+```bash
+./rubik-servo-calibrate \
+  --axis right-gripper \
+  --pulse-us 1500 \
+  --hold-ms 500 \
+  --confirm-axis-motion
+```
+
+Допустимые axis names: `right-gripper`, `bottom-gripper`, `top-gripper`,
+`left-gripper`, `top-rail`, `left-rail`, `bottom-rail`, `right-rail`.
+Pulse ограничен `500..=2500 us`, hold — `100..=5000 ms`; это операционные
+границы инструмента, а не измеренные mechanical limits конкретной оси.
+Окончание команды должно напечатать `outputs=all_off`. Не прерывать test
+через `Ctrl-C`: дождаться этой строки, чтобы программа явно выключила outputs.
+
+### 10.33. Calibrated stand actions
+
+`rubik-stand` имеет встроенную measured calibration и работает без внешнего
+файла. Её значения лежат в `StandCalibration::default()` в `src/stand.rs`.
+`config/stand.toml` — редактируемый override: его можно скопировать на Duo,
+изменить после механической регулировки и передать через `--config`, без
+пересборки Rust binary. В нём лежат и pulse, и длительности механических фаз:
+`timing.rails_open_ms`, `timing.rails_grip_ms`, `timing.gripper_pose_ms`.
+Некорректный TOML, pulse или длительность вне допустимого диапазона, либо
+отсутствующая pose завершают команду до обращения к I²C.
+
+`rubik-stand` — bounded verification tool: он выполняет только именованные
+измеренные actions:
+
+```text
+open  — четыре рельсы одновременно в far/open = 2500 us; default длительность 2 s, затем все захваты в frame-perpendicular
+grip  — всегда выполняет open, ждёт завершения его настроенной фазы, переводит все захваты в frame-perpendicular и только затем одновременно закрывает рельсы в near/grip = 1200 us
+pose  — один захват в измеренную frame-* orientation
+```
+
+Это не просто удобная последовательность, а механический инвариант: два
+смежных захвата не могут одновременно быть в `frame-parallel` (включая
+`frame-parallel-reversed`). Пары: left–top, top–right, right–bottom,
+bottom–left. Все захваты в `frame-perpendicular` — безопасная исходная
+конфигурация. Поэтому команда `grip` не предоставляет способа закрыть рельсы,
+минуя этот reset.
+
+У рельс нет обратной связи положения. Экспериментально открытие занимает около
+1.5 s, поэтому default `timing.rails_open_ms = 2000`; пока эта фаза не
+завершится, PWM на захваты не подаётся. Длительность grip и поворота захватов
+настраиваются там же. Штатная команда не имеет `--hold-ms`, чтобы ручной
+override не нарушил проверенную последовательность.
+
+Команды на плате:
+
+```bash
+./rubik-stand --confirm-stand-motion open
+./rubik-stand --confirm-stand-motion grip
+./rubik-stand --confirm-stand-motion pose --axis left-gripper --orientation frame-parallel
+./rubik-stand --config /mnt/storage/stand.toml --confirm-stand-motion grip
+```
+
+Следующий этап после проверки `open → insert cube → grip → open` — модель
+безопасных transitions между configurations удержания и persistent PWM runtime
+для рельс. Грань нельзя вращать, пока как минимум два неподвижных захвата
+удерживают куб.
+
+Для поиска каждого рабочего предела начинать с 1500 us, двигаться короткими
+повторами по 25–50 us и фиксировать значение с запасом до упора/шума servo.
