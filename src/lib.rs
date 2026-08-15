@@ -6,3 +6,6 @@
 #[cfg(feature = "cvi-camera")]
 pub mod camera;
 pub mod cube;
+#[cfg(feature = "pca9685")]
+pub mod pca9685;
+pub mod stand;

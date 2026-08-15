@@ -53,5 +53,7 @@ export CVI_TOOLCHAIN_ATOMIC_LIB_DIR="$toolchain_root/sysroot/lib64xthead/lp64d"
 export RUBIK_DUO_LLD_DIR="$lld_shim_dir"
 
 cd "$project_root"
-exec cargo build --release --target "$target" --features cvi-camera \
-  --bin rubik-scan --bin rubik-camera-probe --bin rubik-solve "$@"
+exec cargo build --release --target "$target" --features cvi-camera,pca9685 \
+  --bin rubik-scan --bin rubik-camera-probe --bin rubik-solve \
+  --bin rubik-servo-probe --bin rubik-servo-init --bin rubik-servo-calibrate \
+  --bin rubik-stand "$@"

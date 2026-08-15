@@ -11,11 +11,32 @@ cvi-runtime = []
 # Compiles the VI/ISP camera probe against the CVI media stack.  It implies
 # cvi-runtime because both features are only meaningful in the Duo cross-build.
 cvi-camera = ["cvi-runtime"]
+pca9685 = ["dep:i2cdev"]
 
 [[bin]]
 name = "rubik-camera-probe"
 path = "src/bin/rubik-camera-probe.rs"
 required-features = ["cvi-camera"]
+
+[[bin]]
+name = "rubik-servo-probe"
+path = "src/bin/rubik-servo-probe.rs"
+required-features = ["pca9685"]
+
+[[bin]]
+name = "rubik-servo-init"
+path = "src/bin/rubik-servo-init.rs"
+required-features = ["pca9685"]
+
+[[bin]]
+name = "rubik-servo-calibrate"
+path = "src/bin/rubik-servo-calibrate.rs"
+required-features = ["pca9685"]
+
+[[bin]]
+name = "rubik-stand"
+path = "src/bin/rubik-stand.rs"
+required-features = ["pca9685"]
 
 [dependencies]
 anyhow = "1"
@@ -24,6 +45,9 @@ candle-nn = { version = "0.11.0", default-features = false }
 clap = { version = "4", features = ["derive"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 min2phase = { git = "https://github.com/cs0x7f/min2phase_rust.git", rev = "56ce7d4f65b0d2cc49496c43a7ddfff094b227c1" }
+i2cdev = { version = "0.6.2", optional = true }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
 
 [build-dependencies]
 cc = "1"

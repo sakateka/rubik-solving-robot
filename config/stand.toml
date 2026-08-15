@@ -1,0 +1,32 @@
+# Example override for the built-in measured calibration.
+# Copy this file to the board and edit it after mechanical adjustment.
+
+[rails]
+far_open_us = 2500
+near_grip_us = 1200
+
+[timing]
+# The safe open phase must finish before any gripper rotates.
+rails_open_ms = 2000
+rails_grip_ms = 2000
+gripper_pose_ms = 1000
+
+[grippers.left]
+frame_parallel_us = 400
+frame_perpendicular_us = 1450
+frame_parallel_reversed_us = 2450
+
+[grippers.right]
+frame_parallel_us = 450
+frame_perpendicular_us = 1500
+frame_parallel_reversed_us = 2500
+
+[grippers.top]
+frame_parallel_us = 400
+frame_perpendicular_us = 1450
+frame_parallel_reversed_us = 2450
+
+[grippers.bottom]
+frame_parallel_us = 400
+frame_perpendicular_us = 1450
+frame_parallel_reversed_us = 2500
