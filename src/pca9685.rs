@@ -37,6 +37,15 @@ pub struct Pca9685 {
     device: LinuxI2CDevice,
 }
 
+/// Persistent PWM output used by the stand runtime.
+///
+/// `set_channels` must leave every channel not named in `channels` unchanged.
+/// The runtime relies on this to keep the cube held while another axis moves.
+pub trait PwmOutput {
+    fn set_channels(&mut self, channels: &[(u8, u16)]) -> Result<()>;
+    fn all_off(&mut self) -> Result<()>;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Pca9685Status {
     pub mode1: u8,
@@ -132,6 +141,22 @@ impl Pca9685 {
             .with_context(|| format!("failed to {operation}"))
     }
 
+    /// Updates selected channels and leaves every other channel untouched.
+    ///
+    /// This is the persistent operation for the stand runtime. The PCA9685
+    /// must already have been initialized at a servo PWM rate.
+    pub fn set_channels(&mut self, channels: &[(u8, u16)]) -> Result<()> {
+        let status = self.ready_status()?;
+        self.write_channels(channels, status.pwm_hz())
+    }
+
+    /// Disables every individual PCA9685 output channel.
+    ///
+    /// This does not remove servo supply power. It only stops PWM generation.
+    pub fn all_off(&mut self) -> Result<()> {
+        self.force_all_channels_off()
+    }
+
     /// Emits a PWM pulse on exactly one channel for a bounded duration.
     ///
     /// All channels are forced off before the selected channel is configured.
@@ -155,27 +180,16 @@ impl Pca9685 {
         channels: &[(u8, u16)],
         duration: std::time::Duration,
     ) -> Result<()> {
-        if channels.is_empty() {
-            anyhow::bail!("at least one PCA9685 channel is required");
-        }
-        let mut configured = Vec::with_capacity(channels.len());
-        for &(channel, pulse_us) in channels {
-            if channel >= CHANNEL_COUNT {
-                anyhow::bail!("PCA9685 channel must be 0..15, got {channel}");
-            }
-            if configured.iter().any(|&(existing, _)| existing == channel) {
-                anyhow::bail!("PCA9685 channel {channel} was specified more than once");
-            }
-            if !(ABSOLUTE_MIN_CALIBRATION_PULSE_US..=ABSOLUTE_MAX_CALIBRATION_PULSE_US)
-                .contains(&pulse_us)
-            {
-                anyhow::bail!(
-                    "pulse must be {ABSOLUTE_MIN_CALIBRATION_PULSE_US}..={ABSOLUTE_MAX_CALIBRATION_PULSE_US} us, got {pulse_us}"
-                );
-            }
-            configured.push((channel, pulse_us));
-        }
+        let status = self.ready_status()?;
 
+        self.prepare_individual_channel_control(status.mode1)?;
+        self.force_all_channels_off()?;
+        self.write_channels(channels, status.pwm_hz())?;
+        std::thread::sleep(duration);
+        self.force_all_channels_off()
+    }
+
+    fn ready_status(&mut self) -> Result<Pca9685Status> {
         let status = self.status()?;
         if status.sleeping() {
             anyhow::bail!("PCA9685 is asleep; run rubik-servo-init first");
@@ -186,12 +200,25 @@ impl Pca9685 {
                 status.pwm_hz()
             );
         }
+        Ok(status)
+    }
 
-        self.prepare_individual_channel_control(status.mode1)?;
-        self.force_all_channels_off()?;
+    fn write_channels(&mut self, channels: &[(u8, u16)], pwm_hz: f64) -> Result<()> {
+        validate_channels(channels)?;
 
-        for &(channel, pulse_us) in &configured {
-            let ticks = pulse_ticks(pulse_us, status.pwm_hz())?;
+        // Disable only channels that will change. Retained channels continue
+        // holding their commanded position throughout this update.
+        for &(channel, _) in channels {
+            let off_high = LED0_ON_L + channel * CHANNEL_REGISTER_STRIDE + 3;
+            self.write_byte(
+                off_high,
+                FULL_OFF,
+                "disable channel before updating its pulse",
+            )?;
+        }
+
+        for &(channel, pulse_us) in channels {
+            let ticks = pulse_ticks(pulse_us, pwm_hz)?;
             let base = LED0_ON_L + channel * CHANNEL_REGISTER_STRIDE;
             self.write_byte(base, 0, "set selected channel on-time low")?;
             self.write_byte(base + 1, 0, "set selected channel on-time high")?;
@@ -201,10 +228,10 @@ impl Pca9685 {
                 "set selected channel off-time low",
             )?;
         }
-        // The last register write enables each configured channel. Other
-        // channels remain full-off, so no unrequested servo can move.
-        for &(channel, pulse_us) in &configured {
-            let ticks = pulse_ticks(pulse_us, status.pwm_hz())?;
+        // The last register write enables each updated channel. Channels not
+        // listed above were never disabled and retain their previous PWM.
+        for &(channel, pulse_us) in channels {
+            let ticks = pulse_ticks(pulse_us, pwm_hz)?;
             let base = LED0_ON_L + channel * CHANNEL_REGISTER_STRIDE;
             self.write_byte(
                 base + 3,
@@ -212,8 +239,7 @@ impl Pca9685 {
                 "set selected channel off-time high",
             )?;
         }
-        std::thread::sleep(duration);
-        self.force_all_channels_off()
+        Ok(())
     }
 
     fn force_all_channels_off(&mut self) -> Result<()> {
@@ -246,6 +272,41 @@ impl Pca9685 {
             "restart PCA9685 oscillator",
         )
     }
+}
+
+impl PwmOutput for Pca9685 {
+    fn set_channels(&mut self, channels: &[(u8, u16)]) -> Result<()> {
+        Self::set_channels(self, channels)
+    }
+
+    fn all_off(&mut self) -> Result<()> {
+        Self::all_off(self)
+    }
+}
+
+fn validate_channels(channels: &[(u8, u16)]) -> Result<()> {
+    if channels.is_empty() {
+        anyhow::bail!("at least one PCA9685 channel is required");
+    }
+    for (index, &(channel, pulse_us)) in channels.iter().enumerate() {
+        if channel >= CHANNEL_COUNT {
+            anyhow::bail!("PCA9685 channel must be 0..15, got {channel}");
+        }
+        if channels[..index]
+            .iter()
+            .any(|&(existing, _)| existing == channel)
+        {
+            anyhow::bail!("PCA9685 channel {channel} was specified more than once");
+        }
+        if !(ABSOLUTE_MIN_CALIBRATION_PULSE_US..=ABSOLUTE_MAX_CALIBRATION_PULSE_US)
+            .contains(&pulse_us)
+        {
+            anyhow::bail!(
+                "pulse must be {ABSOLUTE_MIN_CALIBRATION_PULSE_US}..={ABSOLUTE_MAX_CALIBRATION_PULSE_US} us, got {pulse_us}"
+            );
+        }
+    }
+    Ok(())
 }
 
 fn prescale_for_hz(frequency_hz: f64) -> Result<u8> {

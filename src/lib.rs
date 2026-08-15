@@ -9,3 +9,5 @@ pub mod cube;
 #[cfg(feature = "pca9685")]
 pub mod pca9685;
 pub mod stand;
+#[cfg(feature = "pca9685")]
+pub mod stand_runtime;
