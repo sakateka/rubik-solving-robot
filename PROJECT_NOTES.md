@@ -1838,3 +1838,85 @@ override не нарушил проверенную последовательн
 
 Для поиска каждого рабочего предела начинать с 1500 us, двигаться короткими
 повторами по 25–50 us и фиксировать значение с запасом до упора/шума servo.
+
+### 10.34. Roadmap: stateful stand runtime
+
+Проверочные CLI (`rubik-servo-*`, `rubik-stand`) намеренно выключают PWM после
+каждой команды. Следующая система должна быть long-running runtime: она держит
+PWM для рельс и захватов между actions и хранит последнюю успешно скомандованную
+конфигурацию. Это плановая state, не измерение положения: у servo нет feedback.
+
+Порядок реализации:
+
+1. Добавить PCA API для persistent PWM по выбранным channels без отключения
+   остальных; `all_off` остаётся отдельной явной операцией.
+2. Ввести `CommandedStandState`: `Unknown`, `OutputsOff`, `SafeOpen`,
+   `Gripped`, `Faulted`. После I²C error — best-effort `all_off`, состояние
+   `Faulted` и запрет новых движений до reset.
+3. Реализовать transitions: `safe_open` держит rail PWM на open в течение
+   `timing.rails_open_ms`, только затем переводит все grippers в perpendicular;
+   `grip` всегда начинает с `safe_open`, затем закрывает rails, не снимая PWM с
+   захватов.
+4. Добавить long-running diagnostic CLI для `state`, `safe-open`, `grip`,
+   `off`, `reset` и корректного shutdown.
+5. Проверить command traces mock backend-ом, затем host tests, cross-build Duo
+   и hardware sequence `safe-open → grip → safe-open → off`.
+
+Статус: persistent channel API, state machine и `rubik-stand-runtime`
+реализованы и проверяются mock backend-ом. CLI инициализирует PCA на 50 Hz,
+выполняет `reset` без движения и принимает `state`, `safe-open`, `grip`, `off`,
+`reset`, `quit`. `quit`, EOF и Ctrl-C вызывают `all_off`; hardware validation
+остаётся отдельным шагом.
+
+Hardware validation выполнена успешно: на реальном стенде проверена
+последовательность `safe-open → grip → safe-open → off`. Рельсы сохраняют
+удержание под persistent PWM, захваты не получают command до окончания фазы
+открытия рельс, а `off` корректно отключает PWM outputs. Stateful runtime
+готов быть основой для первого механического поворота грани.
+
+Persistent PWM означает, что после аварийного завершения процесса PCA9685 может
+продолжать выдавать последний signal. Явный `off`/orderly shutdown необходим;
+аппаратный fail-safe потребует отдельного управления `OE` PCA9685 либо servo
+power rail.
+
+### 10.35. Целевой сценарий: приложение, scan и solve
+
+Конечная система — long-running controller на Milk-V Duo, а не набор отдельных
+CLI. Mobile application отправляет intent пользователя, но safety checks,
+camera scan, solver и вся mechanical choreography остаются на Duo.
+
+```text
+mobile application
+       │ Bluetooth или Wi-Fi
+communication MCU
+       │ локальный serial protocol
+Milk-V Duo controller
+ ├── StandRuntime
+ ├── camera + TPU scanner
+ ├── facelet assembler + validation
+ └── min2phase solver + move executor
+```
+
+Communication MCU нужен только как radio/network coprocessor: потеря связи с
+телефоном не должна сама по себе менять состояние servo. Для этой роли выбран
+один из имеющихся ESP32-C6: он обеспечивает BLE для mobile application и
+оставляет Wi-Fi вариантом для будущего HTTP UI. ESP32-C6 общается с Duo через
+локальный serial protocol; controller заранее проектируется с узкими командами
+уровня `grip`, `scan`, `solve`, `abort`, `status`.
+
+Пользовательский flow:
+
+1. Пользователь кладёт cube в open stand и нажимает `grip`. Duo захватывает
+   cube, остаётся в persistent holding state и ждёт следующего intent.
+2. `scan` запускает scan choreography: стенд последовательно переориентирует
+   cube, оставляя нужную грань перед camera и убирая захваты из её stickers.
+   Каждая camera face нормализуется по orientation и добавляется в полный
+   54-facelet state. После шести scans состояние валидируется.
+3. `solve` разрешён только для valid complete facelet state. Duo запускает
+   min2phase, переводит solver moves в mechanical choreography и исполняет их,
+   сохраняя holding invariants на каждом transition.
+
+Следующий mechanical milestone — не абстрактный servo turn, а regrip primitive:
+безопасно отпустить выбранные rails, переориентировать cube захватами, снова
+удержать его и получить известную camera-facing orientation. На этих primitives
+будут построены и scan choreography, и будущие moves solver-а.
