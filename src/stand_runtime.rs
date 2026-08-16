@@ -159,8 +159,10 @@ where
         Ok(())
     }
 
-    /// Always starts from `safe_open`, then closes rails while retaining PWM on
-    /// all four grippers.
+    /// Closes rails around the cube while retaining PWM on all four grippers.
+    ///
+    /// From an already-established `SafeOpen` pose it closes rails directly.
+    /// Every other operational state first transitions through `safe_open`.
     pub fn grip(&mut self) -> Result<()> {
         if let CommandedStandState::ScanHold(face) = self.state {
             anyhow::bail!(
@@ -168,7 +170,9 @@ where
                 face.name()
             );
         }
-        self.safe_open()?;
+        if self.state != CommandedStandState::SafeOpen {
+            self.safe_open()?;
+        }
         self.move_all_rails(RailPosition::NearGrip)?;
         self.state = CommandedStandState::Gripped;
         self.holding_pair = None;
@@ -381,6 +385,27 @@ where
     /// pairs in perpendicular orientations, then opens the stand without a
     /// subsequent gripper turn.
     pub fn finish_scan(&mut self) -> Result<()> {
+        self.return_front_after_scan()?;
+        self.open_all_rails()?;
+        self.state = CommandedStandState::SafeOpen;
+        self.holding_pair = None;
+        Ok(())
+    }
+
+    /// Returns a completed canonical scan to a front-facing `Gripped` pose.
+    ///
+    /// This is the hand-off for an automatic scan → solve → execute flow. It
+    /// performs the same `B -> F` recovery and perpendicular regrips as
+    /// [`Self::finish_scan`], but keeps all rails closed for the first solver
+    /// move.
+    pub fn finish_scan_for_execution(&mut self) -> Result<()> {
+        self.return_front_after_scan()?;
+        self.state = CommandedStandState::Gripped;
+        self.holding_pair = None;
+        Ok(())
+    }
+
+    fn return_front_after_scan(&mut self) -> Result<()> {
         match (self.state, self.holding_pair) {
             (CommandedStandState::ScanHold(ScanFace::Back), Some(RailPair::TopBottom)) => {}
             (CommandedStandState::ScanHold(face), holding_pair) => anyhow::bail!(
@@ -413,9 +438,6 @@ where
             ),
         ])?;
         self.close_pair(RailPair::TopBottom)?;
-        self.open_all_rails()?;
-        self.state = CommandedStandState::SafeOpen;
-        self.holding_pair = None;
         Ok(())
     }
 
@@ -1002,6 +1024,31 @@ mod tests {
     }
 
     #[test]
+    fn grip_from_safe_open_closes_rails_without_repeating_open_or_gripper_pose() {
+        let mut runtime = initialized_runtime(MockOutput::default());
+        runtime.safe_open().unwrap();
+        let events_before = runtime.output.events.len();
+        let delays_before = runtime.delay.0.len();
+
+        runtime.grip().unwrap();
+
+        assert_eq!(runtime.state(), CommandedStandState::Gripped);
+        assert_eq!(
+            &runtime.output.events[events_before..],
+            [OutputEvent::Set(vec![
+                (4, 1200),
+                (5, 1200),
+                (6, 1200),
+                (7, 1200)
+            ])]
+        );
+        assert_eq!(
+            &runtime.delay.0[delays_before..],
+            [Duration::from_millis(1_200)]
+        );
+    }
+
+    #[test]
     fn output_failure_faults_runtime_and_stops_outputs() {
         let mut runtime = initialized_runtime(MockOutput {
             fail_set_call: Some(2),
@@ -1299,6 +1346,33 @@ mod tests {
                 OutputEvent::Set(vec![(4, 1200), (6, 1200)]),
                 OutputEvent::Set(vec![(5, 2500), (7, 2500)]),
                 OutputEvent::Set(vec![(4, 2500), (6, 2500)]),
+            ]
+        );
+    }
+
+    #[test]
+    fn finish_scan_for_execution_returns_back_to_front_and_keeps_cube_gripped() {
+        let mut runtime = initialized_runtime(MockOutput::default());
+        runtime.grip().unwrap();
+        runtime.scan_pose(ScanFace::Left).unwrap();
+        runtime.scan_next(ScanFace::Right).unwrap();
+        runtime.scan_next(ScanFace::Down).unwrap();
+        runtime.scan_next(ScanFace::Up).unwrap();
+        runtime.scan_next(ScanFace::Front).unwrap();
+        runtime.scan_next(ScanFace::Back).unwrap();
+        let events_before = runtime.output.events.len();
+
+        runtime.finish_scan_for_execution().unwrap();
+
+        assert_eq!(runtime.state(), CommandedStandState::Gripped);
+        assert_eq!(
+            &runtime.output.events[events_before..],
+            [
+                OutputEvent::Set(vec![(2, 400), (1, 2500)]),
+                OutputEvent::Set(vec![(5, 1200), (7, 1200)]),
+                OutputEvent::Set(vec![(4, 2500), (6, 2500)]),
+                OutputEvent::Set(vec![(2, 1450), (1, 1450)]),
+                OutputEvent::Set(vec![(4, 1200), (6, 1200)]),
             ]
         );
     }

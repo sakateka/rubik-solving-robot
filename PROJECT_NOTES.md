@@ -2121,12 +2121,21 @@ solver facelet. Последний строится только после пр
 ./rubik-full-scan --confirm-stand-motion --cvimodel /mnt/storage/cube_yolov8n_320_bf16.cvimodel
 ```
 
-Внутри процесса доступны `scan`, `solve`, `state`, `off`, `quit`. `solve` не
-двигает стенд: он берёт сохранённый результат последнего validated `scan` и
-вызывает `min2phase` с лимитом `--max-moves` (default `21`). До успешной
-проверки цветного facelet команда `solve` недоступна.
+Внутри процесса доступны `scan`, `solve`, `execute`, `scan-solve-execute`,
+`state`, `off`, `quit`. `solve` берёт сохранённый validated scan, вызывает
+`min2phase` с лимитом `--max-moves` (default `21`), печатает sequence и
+подготавливает её для `execute`. Только `execute` заново захватывает
+front-facing cube и исполняет moves по одному через тот же проверенный
+primitive, что использует `rubik-move-probe`. `cancel` сбрасывает
+подготовленную sequence.
 
-Каждый `scan` автоматически сохраняет training evidence в
+`scan-solve-execute` — полностью автоматический вариант: он сканирует cube,
+валидирует facelet, решает его и исполняет полученную sequence без открытия
+rails между scan и первым solver move. После scan стенд возвращает F перед
+camera, но остаётся в canonical `gripped` pose; после успешного последнего
+move он выполняет обычный `safe-open` и выпускает уже собранный cube.
+
+Каждый scan, в том числе внутри `scan-solve-execute`, автоматически сохраняет training evidence в
 `/mnt/storage/rubik-scan-records/scan-YYYY-MM-DD_HH-MM-SS-001/` (base path
 меняется через `--record-dir`; missing directory создаётся автоматически).
 Внутри лежат `U/R/F/D/L/B.png` — ровно те 320×320 RGB ROI frames, на которых

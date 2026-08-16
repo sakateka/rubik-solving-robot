@@ -4,7 +4,10 @@ use anyhow::{bail, Context, Result};
 use clap::Parser;
 use rubik_scan::{
     camera::Camera,
-    cube::{CubeState, Face, LogicalFace, QuarterTurns, ScanPose, StickerColor},
+    cube::{
+        parse_solution, CubeMove, CubeState, Face, LogicalFace, QuarterTurns, ScanPose,
+        StickerColor,
+    },
     grid,
     model::Detector,
     pca9685::Pca9685,
@@ -74,7 +77,7 @@ struct Cli {
     #[arg(long, default_value_t = 21)]
     max_moves: u8,
 
-    /// Required acknowledgement that startup and the `scan` command move the stand
+    /// Required acknowledgement that this program may move the stand
     #[arg(long)]
     confirm_stand_motion: bool,
 }
@@ -100,7 +103,7 @@ fn main() -> Result<()> {
     let camera = Camera::open(&sensor_config)?;
     camera.warmup_vpss(cli.warmup_frames)?;
     let detector = CviTpuDetector::load(&cli.cvimodel)?;
-    println!("scanner ready; commands: scan, solve, state, off, quit");
+    println!("scanner ready; commands: scan, solve, execute, scan-solve-execute, state, off, quit");
 
     command_loop(
         &mut stand,
@@ -137,6 +140,7 @@ fn command_loop(
     });
 
     let mut last_scan: Option<ScanResult> = None;
+    let mut pending_execution: Option<Vec<CubeMove>> = None;
     let mut scan_number = 0_u32;
     let mut stdout = io::stdout();
     prompt(&mut stdout)?;
@@ -148,9 +152,15 @@ fn command_loop(
         };
         match line.trim() {
             "" => {}
-            "help" => println!("commands: scan, solve, state, off, quit"),
+            "help" => {
+                println!(
+                    "commands: scan, solve, execute, scan-solve-execute, cancel, state, off, quit"
+                )
+            }
             "state" => println!("state={}", state_name(stand.state())),
             "scan" => {
+                pending_execution = None;
+                last_scan = None;
                 scan_number += 1;
                 let mut recorder = match ScanRecorder::start(record_dir, scan_number) {
                     Ok(recorder) => Some(recorder),
@@ -159,7 +169,15 @@ fn command_loop(
                         None
                     }
                 };
-                match full_scan(stand, camera, detector, confidence, iou, recorder.as_mut()) {
+                match full_scan(
+                    stand,
+                    camera,
+                    detector,
+                    confidence,
+                    iou,
+                    recorder.as_mut(),
+                    ScanCompletion::OpenStand,
+                ) {
                     Ok(result) => match print_scan_result(&result) {
                         Ok(facelet) => {
                             if let Some(recorder) = recorder.as_mut() {
@@ -175,7 +193,7 @@ fn command_loop(
                                 )
                             );
                             last_scan = Some(result);
-                            println!("scan accepted; enter solve to run min2phase");
+                            println!("scan accepted; enter solve to prepare min2phase execution");
                         }
                         Err(error) => {
                             if let Some(recorder) = recorder.as_mut() {
@@ -199,11 +217,121 @@ fn command_loop(
             }
             "solve" => match last_scan.as_ref() {
                 Some(scan) => match scan.state.solve(max_moves) {
-                    Ok(solution) => println!("solution ({max_moves} moves max): {solution}"),
-                    Err(error) => eprintln!("min2phase rejected the saved facelet: {error:#}"),
+                    Ok(solution) => match parse_solution(&solution) {
+                        Ok(moves) => {
+                            println!("solution ({max_moves} moves max): {solution}");
+                            println!(
+                                "ready to execute {} moves; type execute to grip and start, or cancel",
+                                moves.len()
+                            );
+                            pending_execution = Some(moves);
+                        }
+                        Err(error) => {
+                            eprintln!("could not parse min2phase solution: {error:#}");
+                            pending_execution = None;
+                        }
+                    },
+                    Err(error) => {
+                        eprintln!("min2phase rejected the saved facelet: {error:#}");
+                        pending_execution = None;
+                    }
                 },
                 None => eprintln!("no validated full scan is available; run scan first"),
             },
+            "execute" => match pending_execution.take() {
+                Some(moves) => match execute_solution(stand, &moves) {
+                    Ok(()) => println!("solution executed; stand=gripped front-facing"),
+                    Err(error) => eprintln!(
+                        "execution stopped; stand state={}: {error:#}",
+                        state_name(stand.state())
+                    ),
+                },
+                None => eprintln!("no solution is armed; run solve first"),
+            },
+            "scan-solve-execute" => {
+                pending_execution = None;
+                last_scan = None;
+                scan_number += 1;
+                let mut recorder = match ScanRecorder::start(record_dir, scan_number) {
+                    Ok(recorder) => Some(recorder),
+                    Err(error) => {
+                        eprintln!("scan recording disabled: {error:#}");
+                        None
+                    }
+                };
+                match full_scan(
+                    stand,
+                    camera,
+                    detector,
+                    confidence,
+                    iou,
+                    recorder.as_mut(),
+                    ScanCompletion::KeepGripped,
+                ) {
+                    Ok(result) => match print_scan_result(&result) {
+                        Ok(facelet) => {
+                            if let Some(recorder) = recorder.as_mut() {
+                                if let Err(error) = recorder.save_result(&result, Ok(&facelet)) {
+                                    eprintln!("could not write scan result: {error:#}");
+                                }
+                            }
+                            println!(
+                                "scan record: {}",
+                                recorder.as_ref().map_or_else(
+                                    || "unavailable".to_owned(),
+                                    |recorder| recorder.path.display().to_string()
+                                )
+                            );
+                            match result.state.solve(max_moves) {
+                                Ok(solution) => match parse_solution(&solution) {
+                                    Ok(moves) => {
+                                        println!("solution ({max_moves} moves max): {solution}");
+                                        match execute_solution(stand, &moves)
+                                            .and_then(|()| stand.safe_open())
+                                        {
+                                            Ok(()) => println!(
+                                                "scan, solve, and execution completed; stand=safe-open"
+                                            ),
+                                            Err(error) => eprintln!(
+                                                "automatic execution stopped; stand state={}: {error:#}",
+                                                state_name(stand.state())
+                                            ),
+                                        }
+                                    }
+                                    Err(error) => {
+                                        eprintln!("could not parse min2phase solution: {error:#}")
+                                    }
+                                },
+                                Err(error) => {
+                                    eprintln!("min2phase rejected the saved facelet: {error:#}")
+                                }
+                            }
+                            last_scan = Some(result);
+                        }
+                        Err(error) => {
+                            if let Some(recorder) = recorder.as_mut() {
+                                if let Err(write_error) = recorder.save_result(&result, Err(&error))
+                                {
+                                    eprintln!("could not write scan failure: {write_error:#}");
+                                }
+                            }
+                            eprintln!("scan completed but facelet is invalid: {error:#}");
+                        }
+                    },
+                    Err(error) => {
+                        if let Some(recorder) = recorder.as_mut() {
+                            if let Err(write_error) = recorder.save_failure(&error) {
+                                eprintln!("could not write scan failure: {write_error:#}");
+                            }
+                        }
+                        eprintln!("scan stopped: {error:#}");
+                    }
+                }
+            }
+            "cancel" => {
+                pending_execution = None;
+                println!("pending solution execution cancelled");
+            }
             "off" => {
                 stand.off()?;
                 println!("outputs=all_off");
@@ -223,6 +351,42 @@ fn command_loop(
     Ok(())
 }
 
+fn execute_solution(stand: &mut StandRuntime<Pca9685>, moves: &[CubeMove]) -> Result<()> {
+    match stand.state() {
+        CommandedStandState::SafeOpen => stand.grip()?,
+        CommandedStandState::Gripped => {}
+        state => bail!(
+            "cannot execute from {}; expected safe-open or canonical gripped pose",
+            state_name(state)
+        ),
+    }
+    for (index, cube_move) in moves.iter().copied().enumerate() {
+        println!(
+            "move {}/{}: {}",
+            index + 1,
+            moves.len(),
+            move_name(cube_move)
+        );
+        stand.execute_probe_move(cube_move)?;
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum ScanCompletion {
+    OpenStand,
+    KeepGripped,
+}
+
+fn move_name(cube_move: CubeMove) -> String {
+    let suffix = match cube_move.turn {
+        rubik_scan::cube::MoveTurn::Clockwise => "",
+        rubik_scan::cube::MoveTurn::CounterClockwise => "'",
+        rubik_scan::cube::MoveTurn::Half => "2",
+    };
+    format!("{}{}", cube_move.face.symbol(), suffix)
+}
+
 fn full_scan(
     stand: &mut StandRuntime<Pca9685>,
     camera: &Camera,
@@ -230,6 +394,7 @@ fn full_scan(
     confidence: f32,
     iou: f32,
     mut recorder: Option<&mut ScanRecorder>,
+    completion: ScanCompletion,
 ) -> Result<ScanResult> {
     if stand.state() != CommandedStandState::SafeOpen {
         bail!(
@@ -261,8 +426,16 @@ fn full_scan(
         let captured = capture_face(camera, detector, confidence, iou)?;
         record_face(&mut result, face, captured, recorder.as_deref_mut())?;
     }
-    stand.finish_scan()?;
-    println!("stand=safe-open; cube returned to front-facing orientation");
+    match completion {
+        ScanCompletion::OpenStand => {
+            stand.finish_scan()?;
+            println!("stand=safe-open; cube returned to front-facing orientation");
+        }
+        ScanCompletion::KeepGripped => {
+            stand.finish_scan_for_execution()?;
+            println!("stand=gripped; cube returned to front-facing orientation");
+        }
+    }
     Ok(result)
 }
 
