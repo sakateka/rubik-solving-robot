@@ -6,7 +6,14 @@ use rubik_scan::{
     pca9685::{Pca9685, NOMINAL_MAX_PULSE_US, NOMINAL_MIN_PULSE_US},
     stand::StandAxis,
 };
-use std::{path::PathBuf, time::Duration};
+use std::{
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::{Duration, Instant},
+};
 
 #[derive(Parser)]
 #[command(about = "Move exactly one Rubik stand axis for a bounded calibration interval")]
@@ -31,9 +38,9 @@ struct Cli {
     #[arg(long)]
     allow_out_of_spec_pulse: bool,
 
-    /// Time to hold the pulse; limited to 100..=5000 ms
-    #[arg(long, default_value_t = 500, value_parser = parse_hold_ms)]
-    hold_ms: u64,
+    /// Time to hold the pulse, for example 500ms, 5s, 1m, or 2h
+    #[arg(long, default_value = "500ms", value_parser = humantime::parse_duration)]
+    hold: Duration,
 
     /// Required acknowledgement that the selected axis may move
     #[arg(long)]
@@ -53,16 +60,6 @@ fn parse_address(value: &str) -> Result<u16, String> {
     Ok(parsed)
 }
 
-fn parse_hold_ms(value: &str) -> Result<u64, String> {
-    let value: u64 = value
-        .parse()
-        .map_err(|error| format!("invalid hold duration {value:?}: {error}"))?;
-    if !(100..=5_000).contains(&value) {
-        return Err(format!("hold duration must be 100..=5000 ms, got {value}"));
-    }
-    Ok(value)
-}
-
 fn main() -> Result<()> {
     let cli = Cli::parse();
     if !cli.confirm_axis_motion {
@@ -79,19 +76,70 @@ fn main() -> Result<()> {
         );
     }
 
+    let interrupted = Arc::new(AtomicBool::new(false));
+    let signal_interrupted = Arc::clone(&interrupted);
+    ctrlc::set_handler(move || signal_interrupted.store(true, Ordering::SeqCst))?;
+
     let mut controller = Pca9685::open(&cli.i2c_device, cli.address)?;
     println!(
-        "calibration axis={} channel={} pulse_us={} hold_ms={}",
+        "calibration axis={} channel={} pulse_us={} hold={:?}",
         cli.axis.name(),
         cli.axis.channel(),
         cli.pulse_us,
-        cli.hold_ms,
+        cli.hold,
     );
-    controller.pulse_channel_for(
-        cli.axis.channel(),
-        cli.pulse_us,
-        Duration::from_millis(cli.hold_ms),
-    )?;
+    let pulse_result = controller.begin_pulse_channels(&[(cli.axis.channel(), cli.pulse_us)]);
+    let was_interrupted = if pulse_result.is_ok() {
+        wait_for_hold(cli.hold, &interrupted)
+    } else {
+        interrupted.load(Ordering::SeqCst)
+    };
+    let off_result = controller.all_off();
+
+    pulse_result?;
+    off_result?;
+    if was_interrupted {
+        bail!("Ctrl-C received; outputs=all_off");
+    }
     println!("outputs=all_off");
     Ok(())
+}
+
+/// Sleeps in short intervals so Ctrl-C can stop PWM promptly during a hold.
+fn wait_for_hold(duration: Duration, interrupted: &AtomicBool) -> bool {
+    let mut remaining = duration;
+    while !remaining.is_zero() {
+        if interrupted.load(Ordering::SeqCst) {
+            return true;
+        }
+        let interval = remaining.min(Duration::from_millis(10));
+        let start = Instant::now();
+        std::thread::sleep(interval);
+        remaining = remaining.saturating_sub(start.elapsed());
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cli;
+    use clap::Parser;
+    use std::time::Duration;
+
+    #[test]
+    fn cli_uses_humantime_duration_syntax_without_an_upper_bound() {
+        let cli = Cli::try_parse_from([
+            "rubik-servo-calibrate",
+            "--axis",
+            "right-gripper",
+            "--hold",
+            "1h 30m",
+            "--confirm-axis-motion",
+            "--pulse-us",
+            "1500",
+        ])
+        .unwrap();
+
+        assert_eq!(cli.hold, Duration::from_secs(5_400));
+    }
 }

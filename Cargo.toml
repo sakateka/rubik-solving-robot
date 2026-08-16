@@ -50,6 +50,7 @@ candle-nn = { version = "0.11.0", default-features = false }
 clap = { version = "4", features = ["derive"] }
 ctrlc = "3.4"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+humantime = "2"
 min2phase = { git = "https://github.com/cs0x7f/min2phase_rust.git", rev = "56ce7d4f65b0d2cc49496c43a7ddfff094b227c1" }
 i2cdev = { version = "0.6.2", optional = true }
 serde = { version = "1", features = ["derive"] }

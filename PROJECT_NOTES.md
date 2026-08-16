@@ -1701,6 +1701,10 @@ impulse width: эти параметры будут измерены отдел�
 удержания. До включения выбранного канала он ставит `full-off` на всех 16
 individual channels PCA и ставит выбранный channel активным последним. По
 завершении hold interval он снова ставит все individual channels в `full-off`.
+`--hold` использует crate `humantime` и принимает duration без верхнего
+ограничения: например `500ms`, `5s`, `1m`, `2h` или `1h 30m`. Ctrl-C во время
+hold проверяется с интервалом до 10 ms и
+завершает command через `all_off` для всех 16 channels.
 
 Первый hardware sweep выявил bug ранней версии: global `ALL_LED_OFF_H`
 использовался как runtime output gate. При pulse 1500 us registers показали
@@ -1775,17 +1779,14 @@ PWM input, тогда как MG996R рельс становятся back-drivabl
 Первый тест любой оси — короткая команда около середины диапазона:
 
 ```bash
-./rubik-servo-calibrate \
-  --axis right-gripper \
-  --pulse-us 1500 \
-  --hold-ms 500 \
-  --confirm-axis-motion
+./rubik-servo-calibrate --axis right-gripper --hold 500ms --confirm-axis-motion --pulse-us 1500
 ```
 
 Допустимые axis names: `right-gripper`, `bottom-gripper`, `top-gripper`,
 `left-gripper`, `top-rail`, `left-rail`, `bottom-rail`, `right-rail`.
-Pulse ограничен `500..=2500 us`, hold — `100..=5000 ms`; это операционные
-границы инструмента, а не измеренные mechanical limits конкретной оси.
+Pulse ограничен `500..=2500 us`; `--hold` принимает human-readable duration
+через `humantime` и не имеет верхней границы. Это операционные
+параметры инструмента, а не измеренные mechanical limits конкретной оси.
 Окончание команды должно напечатать `outputs=all_off`. Не прерывать test
 через `Ctrl-C`: дождаться этой строки, чтобы программа явно выключила outputs.
 
@@ -1819,7 +1820,7 @@ bottom–left. Все захваты в `frame-perpendicular` — безопас
 У рельс нет обратной связи положения. Экспериментально открытие занимает около
 1.5 s, поэтому default `timing.rails_open_ms = 2000`; пока эта фаза не
 завершится, PWM на захваты не подаётся. Длительность grip и поворота захватов
-настраиваются там же. Штатная команда не имеет `--hold-ms`, чтобы ручной
+настраиваются там же. Штатная команда не имеет `--hold`, чтобы ручной
 override не нарушил проверенную последовательность.
 
 Команды на плате:
@@ -1879,6 +1880,12 @@ Persistent PWM означает, что после аварийного заве
 аппаратный fail-safe потребует отдельного управления `OE` PCA9685 либо servo
 power rail.
 
+`abort` — emergency stop, а не мягкая отмена workflow: он немедленно вызывает
+`all_off`, не пытается завершить текущую mechanical phase и переводит
+controller в состояние, из которого требуется явный reset/recovery. Потеря
+holding torque и неизвестная физическая pose после emergency stop принимаются
+как меньший риск по сравнению с продолжающимся движением при поломке.
+
 ### 10.35. Целевой сценарий: приложение, scan и solve
 
 Конечная система — long-running controller на Milk-V Duo, а не набор отдельных
@@ -1909,8 +1916,11 @@ Communication MCU нужен только как radio/network coprocessor: по
 1. Пользователь кладёт cube в open stand и нажимает `grip`. Duo захватывает
    cube, остаётся в persistent holding state и ждёт следующего intent.
 2. `scan` запускает scan choreography: стенд последовательно переориентирует
-   cube, оставляя нужную грань перед camera и убирая захваты из её stickers.
-   Каждая camera face нормализуется по orientation и добавляется в полный
+   cube в scan-hold pose. Одна противоположная пара rails удерживает cube, а
+   вторая отведена от него; удерживающие grippers находятся в parallel либо
+   parallel-reversed orientation. Scan запрещён из all-perpendicular grip,
+   потому что захваты закрывают stickers в camera frame. Каждая camera face
+   уже находится в канонической orientation и прямо добавляется в полный
    54-facelet state. После шести scans состояние валидируется.
 3. `solve` разрешён только для valid complete facelet state. Duo запускает
    min2phase, переводит solver moves в mechanical choreography и исполняет их,
@@ -1920,3 +1930,94 @@ Communication MCU нужен только как radio/network coprocessor: по
 безопасно отпустить выбранные rails, переориентировать cube захватами, снова
 удержать его и получить известную camera-facing orientation. На этих primitives
 будут построены и scan choreography, и будущие moves solver-а.
+
+Исходная holding pose после `grip` — все четыре gripper в
+`frame_perpendicular`. Первая измеренная scan-hold configuration использует
+left/right pair: открыть left/right rails, перевести left gripper в
+`frame_parallel`, right gripper в `frame_parallel_reversed`, закрыть left/right
+rails и открыть top/bottom rails. В этой configuration front face открыт для
+camera.
+
+Та же удерживающая left/right pair делает whole-cube turn вокруг оси
+`left↔right`: из этой scan-hold configuration одновременный переход обоих
+grippers в `frame_perpendicular` даёт поворот на 90°: перед camera оказывается
+`U` (top). Противоположный 90° turn даёт `D` (bottom). Переход на 180° через
+эту ось также может физически вывести `B` (back) перед camera, но не является
+канонической scan pose для `B` и в scan choreography не используется.
+
+Для `B` применяется только 180° turn вокруг вертикальной оси `top↔bottom`
+(через последовательность `F → R → B` либо `F → L → B`). Это измеренные
+механические target poses; их нельзя заменять предположением о направлении
+вращения servo. Scan choreography намеренно выбирает только такие whole-cube
+orientations, в которых camera grid уже является канонической facelet-сеткой:
+`F1…F9`, `R1…R9`, `B1…B9` и так далее — без поворота или отражения матрицы в
+software. Для `F → R`, `F → L` и продолжения этих turns соответствие
+сохраняется физически. Остаётся подобрать такие же canonical scan poses для
+`U` и `D`.
+
+Вторая измеренная scan-hold configuration использует top/bottom pair: открыть
+top/bottom rails, перевести top gripper в `frame_parallel`, bottom gripper в
+`frame_parallel_reversed`, закрыть top/bottom rails и открыть left/right rails.
+Из неё одновременный переход top и bottom grippers в
+`frame_perpendicular` даёт whole-cube turn вокруг оси `top↔bottom`: перед
+camera оказывается `R` (right). Однако это ещё не scan pose: top и bottom
+grippers в `frame_perpendicular` закрывают верхний и нижний средние stickers
+этой face. Чтобы отсканировать `R`, нужен regrip на left/right pair в
+`frame_parallel` / `frame_parallel_reversed`, после которого top/bottom rails
+открыты. Regrip не меняет orientation cube, поэтому canonical order `R1…R9`
+сохраняется и в этой открытой scan pose.
+
+#### Canonical scan choreography: `F → L`
+
+Ниже — полная последовательность для scan `L`, записанная не как направление
+servo, а как механические состояния стенда. Исходное состояние всегда одно:
+после `grip` все четыре rails находятся в `near/grip`, все четыре grippers — в
+`frame_perpendicular`, перед camera находится `F`.
+
+1. Открыть top/bottom rails (`far/open`) и дождаться `timing.rails_open_ms`.
+   Left/right pair всё это время удерживает cube.
+2. Только после полного открытия rails перевести top gripper в
+   `frame_parallel_reversed`, bottom gripper — в `frame_parallel`; дождаться
+   `timing.gripper_pose_ms`.
+3. Закрыть top/bottom rails (`near/grip`) и дождаться
+   `timing.rails_grip_ms`: теперь cube удерживается top/bottom pair в
+   подготовленной orientation.
+4. Открыть left/right rails и дождаться `timing.rails_open_ms`.
+5. Одновременно перевести top и bottom grippers в `frame_perpendicular`.
+   Cube совершает whole-cube turn `F → L`, но удерживающие top/bottom grippers
+   закрывают central stickers новой camera-facing face.
+6. Left/right rails уже полностью открыты, поэтому перевести left gripper в
+   `frame_parallel`, right gripper — в `frame_parallel_reversed`; дождаться
+   `timing.gripper_pose_ms`. Top/bottom остаются в `frame_perpendicular` и
+   продолжают удерживать cube.
+7. Закрыть left/right rails и дождаться `timing.rails_grip_ms`.
+8. Открыть top/bottom rails и дождаться `timing.rails_open_ms`.
+
+После шага 8 `L` смотрит в camera, видны все девять stickers, а cube
+удерживается left/right pair. Camera grid напрямую соответствует `L1…L9`;
+software не поворачивает и не отражает матрицу. `F → R` имеет ту же структуру,
+но подготовительная top/bottom orientation обратна: `top = frame_parallel`,
+`bottom = frame_parallel_reversed`.
+
+#### Runtime probe: canonical scan poses
+
+Для физической проверки этих переходов `rubik-stand-runtime` содержит команду
+`scan-pose <front|left|right|up|down|back>`. Она является deliberately bounded probe, а
+не общим planner-ом: принимается только из initial `gripped` state, выполняет
+один переход из `F` и оставляет PWM включённым в финальной `ScanHold(face)`
+configuration для визуального осмотра. Перед ней обязательно выполнить
+`grip`; после осмотра — `off` или штатный выход из runtime.
+
+```sh
+./rubik-stand-runtime --confirm-stand-motion
+> grip
+> scan-pose left
+```
+
+Реализованные цели имеют канонический facelet mapping: `front`, `left`,
+`right`, `up`, `down` и `back`. `front` делает только regrip для открытия
+исходной `F`; `back` строится только вертикальным маршрутом `F → R → B`.
+Внутренние mock tests проверяют полный PWM command trace для `left` и запрещают
+`scan-pose`, если runtime не находится в initial `gripped` state. Каждая
+реальная цель должна быть отдельно проверена на стенде до использования в
+будущей автоматической scan choreography.

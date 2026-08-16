@@ -180,13 +180,22 @@ impl Pca9685 {
         channels: &[(u8, u16)],
         duration: std::time::Duration,
     ) -> Result<()> {
+        self.begin_pulse_channels(channels)?;
+        std::thread::sleep(duration);
+        self.force_all_channels_off()
+    }
+
+    /// Enables pulses on the selected channels and returns immediately.
+    ///
+    /// The caller is responsible for calling [`Self::all_off`] afterwards,
+    /// including on cancellation. This lower-level form lets calibration tools
+    /// poll an interrupt while a servo is being held.
+    pub fn begin_pulse_channels(&mut self, channels: &[(u8, u16)]) -> Result<()> {
         let status = self.ready_status()?;
 
         self.prepare_individual_channel_control(status.mode1)?;
         self.force_all_channels_off()?;
-        self.write_channels(channels, status.pwm_hz())?;
-        std::thread::sleep(duration);
-        self.force_all_channels_off()
+        self.write_channels(channels, status.pwm_hz())
     }
 
     fn ready_status(&mut self) -> Result<Pca9685Status> {

@@ -6,7 +6,7 @@
 
 use crate::{
     pca9685::PwmOutput,
-    stand::{GripConfiguration, RailPosition, StandAxis, StandCalibration},
+    stand::{GripConfiguration, GripperOrientation, RailPosition, StandAxis, StandCalibration},
 };
 use anyhow::{Context, Result};
 use std::time::Duration;
@@ -21,8 +21,51 @@ pub enum CommandedStandState {
     SafeOpen,
     /// Rails are closed around the cube with the safe gripper configuration.
     Gripped,
+    /// A named cube face is open for the camera and held by one opposite pair.
+    ScanHold(ScanFace),
     /// An output operation failed; no motion is allowed until `reset` succeeds.
     Faulted,
+}
+
+/// A face reached from the initial `F` grip in a canonical scan orientation.
+///
+/// The names are cube coordinates, not detected sticker colours. Every
+/// supported pose exposes the named face without a software grid transform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanFace {
+    Front,
+    Left,
+    Right,
+    Up,
+    Down,
+    Back,
+}
+
+impl ScanFace {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Front => "front",
+            Self::Left => "left",
+            Self::Right => "right",
+            Self::Up => "up",
+            Self::Down => "down",
+            Self::Back => "back",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RailPair {
+    LeftRight,
+    TopBottom,
+}
+
+/// Canonical whole-cube turns around the vertical top/bottom axis.
+#[derive(Clone, Copy)]
+enum VerticalTurn {
+    Left,
+    Right,
+    Back,
 }
 
 pub trait Delay {
@@ -118,6 +161,33 @@ where
         Ok(())
     }
 
+    /// Moves from the initial `Gripped(F)` pose to a camera-open scan pose.
+    ///
+    /// This is deliberately a bounded validation primitive, not a general
+    /// motion planner. Each rail-opening phase completes before any gripper
+    /// moves on that pair, and the final state keeps PWM asserted for the
+    /// holding pair while the caller inspects the cube.
+    pub fn scan_pose(&mut self, face: ScanFace) -> Result<()> {
+        if self.state != CommandedStandState::Gripped {
+            anyhow::bail!(
+                "cannot enter scan pose {}: expected gripped initial pose, current state is {}",
+                face.name(),
+                state_name(self.state)
+            );
+        }
+
+        match face {
+            ScanFace::Front => self.regrip_left_right_for_scan()?,
+            ScanFace::Left => self.vertical_turn(VerticalTurn::Left)?,
+            ScanFace::Right => self.vertical_turn(VerticalTurn::Right)?,
+            ScanFace::Up => self.horizontal_turn_to_up()?,
+            ScanFace::Down => self.horizontal_turn_to_down()?,
+            ScanFace::Back => self.vertical_turn(VerticalTurn::Back)?,
+        }
+        self.state = CommandedStandState::ScanHold(face);
+        Ok(())
+    }
+
     pub fn into_inner(self) -> D {
         self.output
     }
@@ -132,7 +202,8 @@ where
             ),
             CommandedStandState::OutputsOff
             | CommandedStandState::SafeOpen
-            | CommandedStandState::Gripped => Ok(()),
+            | CommandedStandState::Gripped
+            | CommandedStandState::ScanHold(_) => Ok(()),
         }
     }
 
@@ -141,6 +212,164 @@ where
             Ok(()) => Ok(()),
             Err(error) => self.fault("failed to update PCA9685 PWM outputs", error),
         }
+    }
+
+    fn open_pair(&mut self, pair: RailPair) -> Result<()> {
+        self.set_channels(&rail_pair_channels(
+            &self.calibration,
+            pair,
+            RailPosition::FarOpen,
+        ))?;
+        self.delay
+            .sleep(self.calibration.rail_duration(RailPosition::FarOpen));
+        Ok(())
+    }
+
+    fn close_pair(&mut self, pair: RailPair) -> Result<()> {
+        self.set_channels(&rail_pair_channels(
+            &self.calibration,
+            pair,
+            RailPosition::NearGrip,
+        ))?;
+        self.delay
+            .sleep(self.calibration.rail_duration(RailPosition::NearGrip));
+        Ok(())
+    }
+
+    fn pose_grippers(&mut self, poses: &[(StandAxis, GripperOrientation)]) -> Result<()> {
+        self.set_channels(&gripper_channels_for_axes(&self.calibration, poses)?)?;
+        self.delay.sleep(self.calibration.gripper_pose_duration());
+        Ok(())
+    }
+
+    /// `F -> L`, `F -> R`, or canonical `F -> R -> B` around top/bottom.
+    fn vertical_turn(&mut self, turn: VerticalTurn) -> Result<()> {
+        self.open_pair(RailPair::TopBottom)?;
+        let (top, bottom) = match turn {
+            VerticalTurn::Right | VerticalTurn::Back => (
+                GripperOrientation::FrameParallel,
+                GripperOrientation::FrameParallelReversed,
+            ),
+            VerticalTurn::Left => (
+                GripperOrientation::FrameParallelReversed,
+                GripperOrientation::FrameParallel,
+            ),
+        };
+        self.pose_grippers(&[
+            (StandAxis::TopGripper, top),
+            (StandAxis::BottomGripper, bottom),
+        ])?;
+        self.close_pair(RailPair::TopBottom)?;
+        self.open_pair(RailPair::LeftRight)?;
+        self.pose_grippers(&[
+            (
+                StandAxis::TopGripper,
+                GripperOrientation::FramePerpendicular,
+            ),
+            (
+                StandAxis::BottomGripper,
+                GripperOrientation::FramePerpendicular,
+            ),
+        ])?;
+
+        match turn {
+            // The side face is still obscured by top/bottom. Regrip on left/right.
+            VerticalTurn::Left | VerticalTurn::Right => self.enter_left_right_scan_hold(),
+            // Continue the same vertical turn from R to B. Parallel top/bottom
+            // grippers leave B open, so no additional regrip is needed.
+            VerticalTurn::Back => self.pose_grippers(&[
+                (
+                    StandAxis::TopGripper,
+                    GripperOrientation::FrameParallelReversed,
+                ),
+                (StandAxis::BottomGripper, GripperOrientation::FrameParallel),
+            ]),
+        }
+    }
+
+    /// Opens the camera view while retaining the cube with left/right.
+    fn regrip_left_right_for_scan(&mut self) -> Result<()> {
+        self.open_pair(RailPair::LeftRight)?;
+        self.enter_left_right_scan_hold()
+    }
+
+    /// Completes a left/right regrip after those rails have fully opened.
+    fn enter_left_right_scan_hold(&mut self) -> Result<()> {
+        self.pose_grippers(&[
+            (StandAxis::LeftGripper, GripperOrientation::FrameParallel),
+            (
+                StandAxis::RightGripper,
+                GripperOrientation::FrameParallelReversed,
+            ),
+        ])?;
+        self.close_pair(RailPair::LeftRight)?;
+        self.open_pair(RailPair::TopBottom)
+    }
+
+    /// `F -> U`, then regrip on top/bottom to expose the face.
+    fn horizontal_turn_to_up(&mut self) -> Result<()> {
+        self.open_pair(RailPair::LeftRight)?;
+        self.pose_grippers(&[
+            (StandAxis::LeftGripper, GripperOrientation::FrameParallel),
+            (
+                StandAxis::RightGripper,
+                GripperOrientation::FrameParallelReversed,
+            ),
+        ])?;
+        self.close_pair(RailPair::LeftRight)?;
+        self.open_pair(RailPair::TopBottom)?;
+        self.pose_grippers(&[
+            (
+                StandAxis::LeftGripper,
+                GripperOrientation::FramePerpendicular,
+            ),
+            (
+                StandAxis::RightGripper,
+                GripperOrientation::FramePerpendicular,
+            ),
+        ])?;
+
+        self.regrip_top_bottom_for_scan()
+    }
+
+    /// `F -> D`, then regrip on top/bottom to expose the face.
+    fn horizontal_turn_to_down(&mut self) -> Result<()> {
+        self.open_pair(RailPair::LeftRight)?;
+        self.pose_grippers(&[
+            (
+                StandAxis::LeftGripper,
+                GripperOrientation::FrameParallelReversed,
+            ),
+            (StandAxis::RightGripper, GripperOrientation::FrameParallel),
+        ])?;
+        self.close_pair(RailPair::LeftRight)?;
+        self.open_pair(RailPair::TopBottom)?;
+        self.pose_grippers(&[
+            (
+                StandAxis::LeftGripper,
+                GripperOrientation::FramePerpendicular,
+            ),
+            (
+                StandAxis::RightGripper,
+                GripperOrientation::FramePerpendicular,
+            ),
+        ])?;
+
+        self.regrip_top_bottom_for_scan()
+    }
+
+    /// Opens the camera view while retaining the cube with top/bottom.
+    fn regrip_top_bottom_for_scan(&mut self) -> Result<()> {
+        // The top/bottom rails are already open in the F -> U/D paths.
+        self.pose_grippers(&[
+            (StandAxis::TopGripper, GripperOrientation::FrameParallel),
+            (
+                StandAxis::BottomGripper,
+                GripperOrientation::FrameParallelReversed,
+            ),
+        ])?;
+        self.close_pair(RailPair::TopBottom)?;
+        self.open_pair(RailPair::LeftRight)
     }
 
     fn fault<R>(&mut self, message: &str, error: anyhow::Error) -> Result<R> {
@@ -157,6 +386,20 @@ where
 fn rail_channels(calibration: &StandCalibration, position: RailPosition) -> Vec<(u8, u16)> {
     StandAxis::RAILS
         .into_iter()
+        .map(|axis| (axis.channel(), calibration.rail_pulse(position)))
+        .collect()
+}
+
+fn rail_pair_channels(
+    calibration: &StandCalibration,
+    pair: RailPair,
+    position: RailPosition,
+) -> Vec<(u8, u16)> {
+    let axes = match pair {
+        RailPair::LeftRight => [StandAxis::LeftRail, StandAxis::RightRail],
+        RailPair::TopBottom => [StandAxis::TopRail, StandAxis::BottomRail],
+    };
+    axes.into_iter()
         .map(|axis| (axis.channel(), calibration.rail_pulse(position)))
         .collect()
 }
@@ -185,6 +428,39 @@ fn gripper_channels(
             })
     })
     .collect()
+}
+
+fn gripper_channels_for_axes(
+    calibration: &StandCalibration,
+    poses: &[(StandAxis, GripperOrientation)],
+) -> Result<Vec<(u8, u16)>> {
+    poses
+        .iter()
+        .copied()
+        .map(|(axis, orientation)| {
+            calibration
+                .gripper_pulse(axis, orientation)
+                .map(|pulse_us| (axis.channel(), pulse_us))
+                .with_context(|| {
+                    format!(
+                        "{} has no calibrated {} pose",
+                        axis.name(),
+                        orientation.name()
+                    )
+                })
+        })
+        .collect()
+}
+
+fn state_name(state: CommandedStandState) -> &'static str {
+    match state {
+        CommandedStandState::Unknown => "unknown",
+        CommandedStandState::OutputsOff => "outputs-off",
+        CommandedStandState::SafeOpen => "safe-open",
+        CommandedStandState::Gripped => "gripped",
+        CommandedStandState::ScanHold(face) => face.name(),
+        CommandedStandState::Faulted => "faulted",
+    }
 }
 
 #[cfg(test)]
@@ -286,5 +562,46 @@ mod tests {
         assert_eq!(runtime.output.events.last(), Some(&OutputEvent::AllOff));
         assert!(runtime.grip().is_err());
         assert_eq!(runtime.output.set_calls, 2);
+    }
+
+    #[test]
+    fn left_scan_pose_follows_the_verified_regrip_sequence() {
+        let mut runtime = initialized_runtime(MockOutput::default());
+        runtime.grip().unwrap();
+        runtime.scan_pose(ScanFace::Left).unwrap();
+
+        assert_eq!(
+            runtime.state(),
+            CommandedStandState::ScanHold(ScanFace::Left)
+        );
+        assert_eq!(
+            runtime.output.events,
+            vec![
+                OutputEvent::AllOff,
+                OutputEvent::Set(vec![(4, 2500), (5, 2500), (6, 2500), (7, 2500)]),
+                OutputEvent::Set(vec![(0, 1500), (1, 1450), (2, 1450), (3, 1450)]),
+                OutputEvent::Set(vec![(4, 1200), (5, 1200), (6, 1200), (7, 1200)]),
+                // Open top/bottom, prepare their reverse holding pose, and turn F -> L.
+                OutputEvent::Set(vec![(4, 2500), (6, 2500)]),
+                OutputEvent::Set(vec![(2, 2450), (1, 400)]),
+                OutputEvent::Set(vec![(4, 1200), (6, 1200)]),
+                OutputEvent::Set(vec![(5, 2500), (7, 2500)]),
+                OutputEvent::Set(vec![(2, 1450), (1, 1450)]),
+                // Regrip left/right so the camera can see all nine L stickers.
+                OutputEvent::Set(vec![(3, 400), (0, 2500)]),
+                OutputEvent::Set(vec![(5, 1200), (7, 1200)]),
+                OutputEvent::Set(vec![(4, 2500), (6, 2500)]),
+            ]
+        );
+        assert_eq!(runtime.delay.0.len(), 11);
+    }
+
+    #[test]
+    fn scan_pose_requires_the_initial_gripped_pose() {
+        let mut runtime = initialized_runtime(MockOutput::default());
+
+        assert!(runtime.scan_pose(ScanFace::Right).is_err());
+        assert_eq!(runtime.state(), CommandedStandState::OutputsOff);
+        assert_eq!(runtime.output.events, vec![OutputEvent::AllOff]);
     }
 }

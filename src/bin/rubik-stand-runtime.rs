@@ -5,7 +5,7 @@ use clap::Parser;
 use rubik_scan::{
     pca9685::Pca9685,
     stand::StandCalibration,
-    stand_runtime::{CommandedStandState, StandRuntime},
+    stand_runtime::{CommandedStandState, ScanFace, StandRuntime},
 };
 use std::{
     io::{self, BufRead, Write},
@@ -70,7 +70,7 @@ fn main() -> Result<()> {
     runtime.reset()?;
 
     println!(
-        "runtime ready pwm_hz={:.3} state={}; commands: state, safe-open, grip, off, reset, quit",
+        "runtime ready pwm_hz={:.3} state={}; commands: state, safe-open, grip, scan-pose <front|left|right|up|down|back>, off, reset, quit",
         status.pwm_hz(),
         state_name(runtime.state())
     );
@@ -105,7 +105,9 @@ fn command_loop(runtime: &mut StandRuntime<Pca9685>) -> Result<()> {
         let command = line.trim();
         match command {
             "" => {}
-            "help" => println!("commands: state, safe-open, grip, off, reset, quit"),
+            "help" => println!(
+                "commands: state, safe-open, grip, scan-pose <front|left|right|up|down|back>, off, reset, quit"
+            ),
             "state" => println!("state={}", state_name(runtime.state())),
             "safe-open" => {
                 let result = runtime.safe_open();
@@ -115,6 +117,13 @@ fn command_loop(runtime: &mut StandRuntime<Pca9685>) -> Result<()> {
                 let result = runtime.grip();
                 report_motion(result, runtime.state());
             }
+            _ if command.starts_with("scan-pose") => match parse_scan_pose(command) {
+                Ok(face) => {
+                    let result = runtime.scan_pose(face);
+                    report_motion(result, runtime.state());
+                }
+                Err(error) => eprintln!("{error}"),
+            },
             "off" => {
                 let result = runtime.off();
                 report_motion(result, runtime.state());
@@ -156,6 +165,29 @@ fn state_name(state: CommandedStandState) -> &'static str {
         CommandedStandState::OutputsOff => "outputs-off",
         CommandedStandState::SafeOpen => "safe-open",
         CommandedStandState::Gripped => "gripped",
+        CommandedStandState::ScanHold(face) => face.name(),
         CommandedStandState::Faulted => "faulted",
+    }
+}
+
+fn parse_scan_pose(command: &str) -> Result<ScanFace, String> {
+    let mut parts = command.split_whitespace();
+    let _ = parts.next();
+    let Some(face) = parts.next() else {
+        return Err("usage: scan-pose <front|left|right|up|down|back>".to_owned());
+    };
+    if parts.next().is_some() {
+        return Err("usage: scan-pose <front|left|right|up|down|back>".to_owned());
+    }
+    match face {
+        "front" | "f" => Ok(ScanFace::Front),
+        "left" | "l" => Ok(ScanFace::Left),
+        "right" | "r" => Ok(ScanFace::Right),
+        "up" | "u" => Ok(ScanFace::Up),
+        "down" | "d" => Ok(ScanFace::Down),
+        "back" | "b" => Ok(ScanFace::Back),
+        _ => Err(format!(
+            "unknown scan face {face:?}; expected front, left, right, up, down, or back"
+        )),
     }
 }
