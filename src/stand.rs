@@ -176,8 +176,8 @@ impl Default for StandCalibration {
                 },
             },
             timing: TimingCalibration {
-                rails_open_ms: 2_000,
-                rails_grip_ms: 2_000,
+                rails_open_ms: 1_200,
+                rails_grip_ms: 1_200,
                 gripper_pose_ms: 1_000,
             },
         }
@@ -402,7 +402,7 @@ mod tests {
         );
         assert_eq!(
             calibration.rail_duration(RailPosition::FarOpen),
-            Duration::from_secs(2)
+            Duration::from_millis(1_200)
         );
     }
 

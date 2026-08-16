@@ -43,6 +43,8 @@ pub struct Pca9685 {
 /// The runtime relies on this to keep the cube held while another axis moves.
 pub trait PwmOutput {
     fn set_channels(&mut self, channels: &[(u8, u16)]) -> Result<()>;
+    /// Disables selected PWM outputs without affecting any retained channels.
+    fn disable_channels(&mut self, channels: &[u8]) -> Result<()>;
     fn all_off(&mut self) -> Result<()>;
 }
 
@@ -155,6 +157,16 @@ impl Pca9685 {
     /// This does not remove servo supply power. It only stops PWM generation.
     pub fn all_off(&mut self) -> Result<()> {
         self.force_all_channels_off()
+    }
+
+    /// Disables selected PWM outputs while leaving every other channel unchanged.
+    pub fn disable_channels(&mut self, channels: &[u8]) -> Result<()> {
+        validate_channel_ids(channels)?;
+        for &channel in channels {
+            let off_high = LED0_ON_L + channel * CHANNEL_REGISTER_STRIDE + 3;
+            self.write_byte(off_high, FULL_OFF, "disable selected PCA9685 channel")?;
+        }
+        Ok(())
     }
 
     /// Emits a PWM pulse on exactly one channel for a bounded duration.
@@ -288,6 +300,10 @@ impl PwmOutput for Pca9685 {
         Self::set_channels(self, channels)
     }
 
+    fn disable_channels(&mut self, channels: &[u8]) -> Result<()> {
+        Self::disable_channels(self, channels)
+    }
+
     fn all_off(&mut self) -> Result<()> {
         Self::all_off(self)
     }
@@ -313,6 +329,21 @@ fn validate_channels(channels: &[(u8, u16)]) -> Result<()> {
             anyhow::bail!(
                 "pulse must be {ABSOLUTE_MIN_CALIBRATION_PULSE_US}..={ABSOLUTE_MAX_CALIBRATION_PULSE_US} us, got {pulse_us}"
             );
+        }
+    }
+    Ok(())
+}
+
+fn validate_channel_ids(channels: &[u8]) -> Result<()> {
+    if channels.is_empty() {
+        anyhow::bail!("at least one PCA9685 channel is required");
+    }
+    for (index, &channel) in channels.iter().enumerate() {
+        if channel >= CHANNEL_COUNT {
+            anyhow::bail!("PCA9685 channel must be 0..15, got {channel}");
+        }
+        if channels[..index].contains(&channel) {
+            anyhow::bail!("PCA9685 channel {channel} was specified more than once");
         }
     }
     Ok(())

@@ -1818,7 +1818,7 @@ bottom–left. Все захваты в `frame-perpendicular` — безопас
 минуя этот reset.
 
 У рельс нет обратной связи положения. Экспериментально открытие занимает около
-1.5 s, поэтому default `timing.rails_open_ms = 2000`; пока эта фаза не
+1.2 s, поэтому default `timing.rails_open_ms = 1200`; пока эта фаза не
 завершится, PWM на захваты не подаётся. Длительность grip и поворота захватов
 настраиваются там же. Штатная команда не имеет `--hold`, чтобы ручной
 override не нарушил проверенную последовательность.
@@ -1833,8 +1833,8 @@ override не нарушил проверенную последовательн
 ```
 
 Следующий этап после проверки `open → insert cube → grip → open` — модель
-безопасных transitions между configurations удержания и persistent PWM runtime
-для рельс. Грань нельзя вращать, пока как минимум два неподвижных захвата
+безопасных transitions между configurations удержания и selective PWM runtime.
+Грань нельзя вращать, пока как минимум два неподвижных захвата
 удерживают куб.
 
 Для поиска каждого рабочего предела начинать с 1500 us, двигаться короткими
@@ -1843,9 +1843,10 @@ override не нарушил проверенную последовательн
 ### 10.34. Roadmap: stateful stand runtime
 
 Проверочные CLI (`rubik-servo-*`, `rubik-stand`) намеренно выключают PWM после
-каждой команды. Следующая система должна быть long-running runtime: она держит
-PWM для рельс и захватов между actions и хранит последнюю успешно скомандованную
-конфигурацию. Это плановая state, не измерение положения: у servo нет feedback.
+каждой команды. Long-running runtime хранит последнюю успешно скомандованную
+конфигурацию и сохраняет PWM только там, где он нужен для удержания cube:
+grippers. Rails получают PWM на время движения, затем их channels отключаются.
+Это плановая state, не измерение положения: у servo нет feedback.
 
 Порядок реализации:
 
@@ -1854,9 +1855,10 @@ PWM для рельс и захватов между actions и хранит п�
 2. Ввести `CommandedStandState`: `Unknown`, `OutputsOff`, `SafeOpen`,
    `Gripped`, `Faulted`. После I²C error — best-effort `all_off`, состояние
    `Faulted` и запрет новых движений до reset.
-3. Реализовать transitions: `safe_open` держит rail PWM на open в течение
-   `timing.rails_open_ms`, только затем переводит все grippers в perpendicular;
-   `grip` всегда начинает с `safe_open`, затем закрывает rails, не снимая PWM с
+3. Реализовать transitions: `safe_open` подаёт rail PWM на время
+   `timing.rails_open_ms`, отключает completed rail channels и только затем
+   переводит все grippers в perpendicular; `grip` всегда начинает с
+   `safe_open`, затем закрывает rails и снова отключает их PWM, не снимая PWM с
    захватов.
 4. Добавить long-running diagnostic CLI для `state`, `safe-open`, `grip`,
    `off`, `reset` и корректного shutdown.
@@ -1870,15 +1872,16 @@ PWM для рельс и захватов между actions и хранит п�
 остаётся отдельным шагом.
 
 Hardware validation выполнена успешно: на реальном стенде проверена
-последовательность `safe-open → grip → safe-open → off`. Рельсы сохраняют
-удержание под persistent PWM, захваты не получают command до окончания фазы
-открытия рельс, а `off` корректно отключает PWM outputs. Stateful runtime
-готов быть основой для первого механического поворота грани.
+последовательность `safe-open → grip → safe-open → off`. После каждой фазы
+движения rail PWM выключается адресно; gripper PWM остаётся включённым для
+удержания cube. Захваты не получают command до окончания фазы открытия рельс,
+а `off` корректно отключает все PWM outputs. Stateful runtime готов быть
+основой для первого механического поворота грани.
 
-Persistent PWM означает, что после аварийного завершения процесса PCA9685 может
-продолжать выдавать последний signal. Явный `off`/orderly shutdown необходим;
-аппаратный fail-safe потребует отдельного управления `OE` PCA9685 либо servo
-power rail.
+Persistent gripper PWM означает, что после аварийного завершения процесса
+PCA9685 может продолжать выдавать последний signal на gripper channels. Явный
+`off`/orderly shutdown необходим; аппаратный fail-safe потребует отдельного
+управления `OE` PCA9685 либо servo power rail.
 
 `abort` — emergency stop, а не мягкая отмена workflow: он немедленно вызывает
 `all_off`, не пытается завершить текущую mechanical phase и переводит
@@ -1916,8 +1919,9 @@ Communication MCU нужен только как radio/network coprocessor: по
 1. Пользователь кладёт cube в open stand и нажимает `grip`. Duo захватывает
    cube, остаётся в persistent holding state и ждёт следующего intent.
 2. `scan` запускает scan choreography: стенд последовательно переориентирует
-   cube в scan-hold pose. Одна противоположная пара rails удерживает cube, а
-   вторая отведена от него; удерживающие grippers находятся в parallel либо
+   cube в scan-hold pose. Одна противоположная пара grippers удерживает cube
+   при закрытых rails, а вторая pair rails отведена от него; удерживающие
+   grippers находятся в parallel либо
    parallel-reversed orientation. Scan запрещён из all-perpendicular grip,
    потому что захваты закрывают stickers в camera frame. Каждая camera face
    уже находится в канонической orientation и прямо добавляется в полный
@@ -2094,9 +2098,15 @@ edges, например `U → L`, в runtime не добавляются.
 начальные VPSS warm-up frames и загружает `.cvimodel` один раз.
 
 Команда `scan` разрешена только из `safe-open` и выполняет canonical sequence
-`grip → L → R → D → U → F → B`. После каждого camera-open pose берётся один
-320×320 VPSS RGB frame, к нему применяется тот же ROI preprocessing, confidence
-filter, center-window filter и class-agnostic NMS, что у `rubik-scan --camera`.
+`grip → L → R → D → U → F → B → F → safe-open`. Последний `B → F` выполняется
+после съёмки `B`: top/bottom holding pair возвращает cube в ту же физическую
+front-facing orientation, с которой scan начался. Затем left/right pair
+перехватывает cube в perpendicular configuration, top/bottom regrip-ится в
+perpendicular, и только после этого все rails открываются. Поэтому после
+открытия rails ни один gripper больше не получает command на поворот. После
+каждого camera-open pose берётся один 320×320 VPSS RGB
+frame, к нему применяется тот же ROI preprocessing, confidence filter,
+center-window filter и class-agnostic NMS, что у `rubik-scan --camera`.
 Требование ровно девяти detections сохраняется: при другом числе scan
 останавливается, не строя выдуманную грань.
 
@@ -2111,8 +2121,62 @@ solver facelet. Последний строится только после пр
 ./rubik-full-scan --confirm-stand-motion --cvimodel /mnt/storage/cube_yolov8n_320_bf16.cvimodel
 ```
 
-Внутри процесса доступны `scan`, `state`, `off`, `quit`. После обычного
-успешного scan cube остаётся удержанным в `B` scan pose; повторный scan требует
-явного физического восстановления и нового запуска процесса. Если detection
-или camera operation завершается ошибкой, tool не вызывает автоматический
-`safe-open`: operator видит ошибку и сам выбирает `off`/`quit`.
+Внутри процесса доступны `scan`, `solve`, `state`, `off`, `quit`. `solve` не
+двигает стенд: он берёт сохранённый результат последнего validated `scan` и
+вызывает `min2phase` с лимитом `--max-moves` (default `21`). До успешной
+проверки цветного facelet команда `solve` недоступна.
+
+Каждый `scan` автоматически сохраняет training evidence в
+`/mnt/storage/rubik-scan-records/scan-YYYY-MM-DD_HH-MM-SS-001/` (base path
+меняется через `--record-dir`; missing directory создаётся автоматически).
+Внутри лежат `U/R/F/D/L/B.png` — ровно те 320×320 RGB ROI frames, на которых
+работал TPU; одноимённые `.yolo.txt` с его normalized predicted boxes и class
+IDs; `.face.txt` с predicted 3×3 color grid; и `result.txt` либо с solver
+facelet, либо с validation error. Это позволяет отбирать именно неудачные
+lighting cases, корректировать labels и добавлять их в следующий dataset без
+повторной съёмки.
+
+После обычного успешного scan cube снова front-facing и стенд находится в
+`safe-open`, поэтому оператор всегда знает исходную orientation. Если detection
+или camera operation завершается ошибкой, tool не выполняет автоматический
+return/open: operator видит ошибку и сам выбирает `off`/`quit`.
+
+#### Measured direct face-turn convention
+
+Из исходной `grip` pose непосредственно доступны только `L`, `R`, `U`, `D`:
+их собственные rails закрыты, а соседние grippers остаются в
+`frame_perpendicular` и удерживают остальной cube. Для всех четырёх wrist
+servos измерена одна и та же convention:
+
+| face | gripper | `P / ⟂ / PR` (µs) | `⟂ → P` | `⟂ → PR` | `P → ⟂` | `PR → ⟂` |
+|---|---|---:|---|---|---|---|
+| `L` | left | `400 / 1450 / 2450` | `L'` | `L` | `L` | `L'` |
+| `R` | right | `450 / 1500 / 2500` | `R'` | `R` | `R` | `R'` |
+| `U` | top | `400 / 1450 / 2450` | `U'` | `U` | `U` | `U'` |
+| `D` | bottom | `400 / 1450 / 2500` | `D'` | `D` | `D` | `D'` |
+
+`P → PR` и `PR → P` на каждой direct face дают `X2`; физическое направление
+пути различается, но результат один. `F/B` напрямую не захватываются в
+front-facing pose: executor сначала должен сделать verified whole-cube
+reorientation, вывести нужную face на `L/R/U/D`, а затем применить ту же
+direct face primitive.
+
+Для `F/B` выбрана конкретная canonical reorientation, а не отдельная таблица
+калибровки. Разворот всего кубика вокруг вертикальной оси переводит logical
+`F` в физическую позицию `right`,
+а logical `B` — в физическую позицию `left`. Поэтому после этого поворота
+`F`, `F'`, `F2` выполняются точной строкой `R` из таблицы выше, а `B`, `B'`,
+`B2` — строкой `L`. Перед direct turn обязателен regrip: left/right rails
+закрываются, удерживая cube при perpendicular left/right grippers; затем
+top/bottom rails открываются, top/bottom grippers переводятся в
+`frame_perpendicular` и их rails снова закрываются. Только после такого
+перехвата все четыре grippers находятся в `frame_perpendicular`, и turn
+physical `right` или `left` безопасен. Это правило важно сохранить: нельзя
+пытаться выполнять `F/B` прежними top/bottom orientations, оставшимися от
+разворота всего кубика.
+
+Этот yaw является только временной механической переориентацией. После direct
+`F` или `B` turn executor обязан выполнить обратный разворот всего кубика и вернуть
+cube в исходную canonical front-facing orientation. Между solver moves
+orientation cube в стенде не меняется: в logical state остаётся только
+запрошенный `F`/`B` move.

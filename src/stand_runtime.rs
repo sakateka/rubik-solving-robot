@@ -138,9 +138,7 @@ where
     pub fn safe_open(&mut self) -> Result<()> {
         self.require_operational("safe-open")?;
 
-        self.set_channels(&rail_channels(&self.calibration, RailPosition::FarOpen))?;
-        self.delay
-            .sleep(self.calibration.rail_duration(RailPosition::FarOpen));
+        self.open_all_rails()?;
 
         let configuration = GripConfiguration::all_frame_perpendicular();
         configuration.validate()?;
@@ -162,9 +160,7 @@ where
             );
         }
         self.safe_open()?;
-        self.set_channels(&rail_channels(&self.calibration, RailPosition::NearGrip))?;
-        self.delay
-            .sleep(self.calibration.rail_duration(RailPosition::NearGrip));
+        self.move_all_rails(RailPosition::NearGrip)?;
         self.state = CommandedStandState::Gripped;
         self.holding_pair = None;
         Ok(())
@@ -369,6 +365,51 @@ where
         }
     }
 
+    /// Returns a completed canonical scan to the initial front-facing open pose.
+    ///
+    /// This is available only after the `... -> F -> B` scan tail, where
+    /// top/bottom still holds the cube. It returns `B -> F`, regrips both
+    /// pairs in perpendicular orientations, then opens the stand without a
+    /// subsequent gripper turn.
+    pub fn finish_scan(&mut self) -> Result<()> {
+        match (self.state, self.holding_pair) {
+            (CommandedStandState::ScanHold(ScanFace::Back), Some(RailPair::TopBottom)) => {}
+            (CommandedStandState::ScanHold(face), holding_pair) => anyhow::bail!(
+                "cannot finish scan from {} ({})",
+                face.name(),
+                holding_pair.map(rail_pair_name).unwrap_or("unknown holder")
+            ),
+            (state, _) => {
+                anyhow::bail!("cannot finish scan: current state is {}", state_name(state))
+            }
+        }
+
+        self.pose_grippers(&[
+            (StandAxis::TopGripper, GripperOrientation::FrameParallel),
+            (
+                StandAxis::BottomGripper,
+                GripperOrientation::FrameParallelReversed,
+            ),
+        ])?;
+        self.close_pair(RailPair::LeftRight)?;
+        self.open_pair(RailPair::TopBottom)?;
+        self.pose_grippers(&[
+            (
+                StandAxis::TopGripper,
+                GripperOrientation::FramePerpendicular,
+            ),
+            (
+                StandAxis::BottomGripper,
+                GripperOrientation::FramePerpendicular,
+            ),
+        ])?;
+        self.close_pair(RailPair::TopBottom)?;
+        self.open_all_rails()?;
+        self.state = CommandedStandState::SafeOpen;
+        self.holding_pair = None;
+        Ok(())
+    }
+
     pub fn into_inner(self) -> D {
         self.output
     }
@@ -400,6 +441,23 @@ where
         }
     }
 
+    fn disable_channels(&mut self, channels: &[u8]) -> Result<()> {
+        match self.output.disable_channels(channels) {
+            Ok(()) => Ok(()),
+            Err(error) => self.fault("failed to disable completed PCA9685 rail motion", error),
+        }
+    }
+
+    fn move_all_rails(&mut self, position: RailPosition) -> Result<()> {
+        self.set_channels(&rail_channels(&self.calibration, position))?;
+        self.delay.sleep(self.calibration.rail_duration(position));
+        self.disable_channels(&rail_channel_ids_all())
+    }
+
+    fn open_all_rails(&mut self) -> Result<()> {
+        self.move_all_rails(RailPosition::FarOpen)
+    }
+
     fn open_pair(&mut self, pair: RailPair) -> Result<()> {
         self.set_channels(&rail_pair_channels(
             &self.calibration,
@@ -408,7 +466,7 @@ where
         ))?;
         self.delay
             .sleep(self.calibration.rail_duration(RailPosition::FarOpen));
-        Ok(())
+        self.disable_channels(&rail_channel_ids(pair))
     }
 
     fn close_pair(&mut self, pair: RailPair) -> Result<()> {
@@ -419,7 +477,7 @@ where
         ))?;
         self.delay
             .sleep(self.calibration.rail_duration(RailPosition::NearGrip));
-        Ok(())
+        self.disable_channels(&rail_channel_ids(pair))
     }
 
     fn pose_grippers(&mut self, poses: &[(StandAxis, GripperOrientation)]) -> Result<()> {
@@ -598,6 +656,21 @@ fn rail_pair_channels(
         .collect()
 }
 
+fn rail_channel_ids_all() -> Vec<u8> {
+    StandAxis::RAILS
+        .into_iter()
+        .map(StandAxis::channel)
+        .collect()
+}
+
+fn rail_channel_ids(pair: RailPair) -> Vec<u8> {
+    let axes = match pair {
+        RailPair::LeftRight => [StandAxis::LeftRail, StandAxis::RightRail],
+        RailPair::TopBottom => [StandAxis::TopRail, StandAxis::BottomRail],
+    };
+    axes.into_iter().map(StandAxis::channel).collect()
+}
+
 fn gripper_channels(
     calibration: &StandCalibration,
     configuration: GripConfiguration,
@@ -677,6 +750,7 @@ mod tests {
     #[derive(Default)]
     struct MockOutput {
         events: Vec<OutputEvent>,
+        disabled_channels: Vec<Vec<u8>>,
         fail_set_call: Option<usize>,
         set_calls: usize,
     }
@@ -688,6 +762,11 @@ mod tests {
                 anyhow::bail!("injected I2C write failure");
             }
             self.events.push(OutputEvent::Set(channels.to_vec()));
+            Ok(())
+        }
+
+        fn disable_channels(&mut self, channels: &[u8]) -> Result<()> {
+            self.disabled_channels.push(channels.to_vec());
             Ok(())
         }
 
@@ -735,9 +814,9 @@ mod tests {
         assert_eq!(
             runtime.delay.0,
             [
-                Duration::from_secs(2),
+                Duration::from_millis(1_200),
                 Duration::from_secs(1),
-                Duration::from_secs(2),
+                Duration::from_millis(1_200),
             ]
         );
         assert_eq!(
@@ -748,6 +827,10 @@ mod tests {
                 OutputEvent::Set(vec![(0, 1500), (1, 1450), (2, 1450), (3, 1450)]),
                 OutputEvent::Set(vec![(4, 1200), (5, 1200), (6, 1200), (7, 1200)]),
             ]
+        );
+        assert_eq!(
+            runtime.output.disabled_channels,
+            [vec![4, 5, 6, 7], vec![4, 5, 6, 7]]
         );
     }
 
@@ -944,5 +1027,33 @@ mod tests {
             CommandedStandState::ScanHold(ScanFace::Front)
         );
         assert_eq!(runtime.output.events, events_before);
+    }
+
+    #[test]
+    fn finish_scan_returns_back_to_front_before_opening_the_stand() {
+        let mut runtime = initialized_runtime(MockOutput::default());
+        runtime.grip().unwrap();
+        runtime.scan_pose(ScanFace::Left).unwrap();
+        runtime.scan_next(ScanFace::Right).unwrap();
+        runtime.scan_next(ScanFace::Down).unwrap();
+        runtime.scan_next(ScanFace::Up).unwrap();
+        runtime.scan_next(ScanFace::Front).unwrap();
+        runtime.scan_next(ScanFace::Back).unwrap();
+        let events_before = runtime.output.events.len();
+
+        runtime.finish_scan().unwrap();
+
+        assert_eq!(runtime.state(), CommandedStandState::SafeOpen);
+        assert_eq!(
+            &runtime.output.events[events_before..],
+            [
+                OutputEvent::Set(vec![(2, 400), (1, 2500)]),
+                OutputEvent::Set(vec![(5, 1200), (7, 1200)]),
+                OutputEvent::Set(vec![(4, 2500), (6, 2500)]),
+                OutputEvent::Set(vec![(2, 1450), (1, 1450)]),
+                OutputEvent::Set(vec![(4, 1200), (6, 1200)]),
+                OutputEvent::Set(vec![(4, 2500), (5, 2500), (6, 2500), (7, 2500)]),
+            ]
+        );
     }
 }
