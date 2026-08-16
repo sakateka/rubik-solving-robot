@@ -5,6 +5,7 @@
 //! and requires an explicit reset before another motion is attempted.
 
 use crate::{
+    cube::{CubeMove, LogicalFace, MoveTurn},
     pca9685::PwmOutput,
     stand::{GripConfiguration, GripperOrientation, RailPosition, StandAxis, StandCalibration},
 };
@@ -64,6 +65,14 @@ enum RailPair {
 enum Side {
     Left,
     Right,
+}
+
+#[derive(Clone, Copy)]
+enum PhysicalTurnFace {
+    Left,
+    Right,
+    Top,
+    Bottom,
 }
 
 pub trait Delay {
@@ -133,7 +142,7 @@ where
         self.reset()
     }
 
-    /// Opens rails, waits for their configured travel time, then moves all
+    /// Opens left/right rails, then top/bottom rails, before moving all
     /// grippers to the collision-free perpendicular configuration.
     pub fn safe_open(&mut self) -> Result<()> {
         self.require_operational("safe-open")?;
@@ -410,6 +419,44 @@ where
         Ok(())
     }
 
+    /// Executes one bounded diagnostic cube move and restores canonical grip.
+    ///
+    /// The runtime must begin in `Gripped`: all four rails are near and all
+    /// grippers are perpendicular, with logical F facing the camera. On
+    /// success it finishes in exactly that same mechanical reference pose.
+    /// This is intentionally a one-move probe; executing a solver sequence is
+    /// a later layer with its own failure and recovery policy.
+    pub fn execute_probe_move(&mut self, cube_move: CubeMove) -> Result<()> {
+        if self.state != CommandedStandState::Gripped {
+            anyhow::bail!(
+                "cannot execute {}: expected canonical gripped pose, current state is {}",
+                move_name(cube_move),
+                state_name(self.state)
+            );
+        }
+
+        match cube_move.face {
+            LogicalFace::Left => self.direct_face_turn(PhysicalTurnFace::Left, cube_move.turn)?,
+            LogicalFace::Right => self.direct_face_turn(PhysicalTurnFace::Right, cube_move.turn)?,
+            LogicalFace::Up => self.direct_face_turn(PhysicalTurnFace::Top, cube_move.turn)?,
+            LogicalFace::Down => self.direct_face_turn(PhysicalTurnFace::Bottom, cube_move.turn)?,
+            LogicalFace::Front => {
+                self.position_front_back_for_turn()?;
+                self.direct_face_turn(PhysicalTurnFace::Right, cube_move.turn)?;
+                self.restore_front_after_front_back_turn()?;
+            }
+            LogicalFace::Back => {
+                self.position_front_back_for_turn()?;
+                self.direct_face_turn(PhysicalTurnFace::Left, cube_move.turn)?;
+                self.restore_front_after_front_back_turn()?;
+            }
+        }
+
+        self.state = CommandedStandState::Gripped;
+        self.holding_pair = None;
+        Ok(())
+    }
+
     pub fn into_inner(self) -> D {
         self.output
     }
@@ -455,7 +502,11 @@ where
     }
 
     fn open_all_rails(&mut self) -> Result<()> {
-        self.move_all_rails(RailPosition::FarOpen)
+        // Do not release all four rails at once. While the first pair opens,
+        // the opposite pair still holds the cube; only then is the second
+        // pair allowed to open.
+        self.open_pair(RailPair::LeftRight)?;
+        self.open_pair(RailPair::TopBottom)
     }
 
     fn open_pair(&mut self, pair: RailPair) -> Result<()> {
@@ -484,6 +535,102 @@ where
         self.set_channels(&gripper_channels_for_axes(&self.calibration, poses)?)?;
         self.delay.sleep(self.calibration.gripper_pose_duration());
         Ok(())
+    }
+
+    /// Turns one physically accessible face, then releases and regrips that
+    /// wrist in perpendicular orientation so the next probe starts canonical.
+    fn direct_face_turn(&mut self, face: PhysicalTurnFace, turn: MoveTurn) -> Result<()> {
+        let (gripper, rail) = physical_turn_axes(face);
+        match turn {
+            MoveTurn::Clockwise => {
+                self.pose_grippers(&[(gripper, GripperOrientation::FrameParallelReversed)])?
+            }
+            MoveTurn::CounterClockwise => {
+                self.pose_grippers(&[(gripper, GripperOrientation::FrameParallel)])?
+            }
+            MoveTurn::Half => {
+                // A half turn must begin from a parallel regrip: the measured
+                // `P -> PR` transition is X2. Moving Perpendicular -> PR
+                // would be only a quarter turn.
+                self.open_rail(rail)?;
+                self.pose_grippers(&[(gripper, GripperOrientation::FrameParallel)])?;
+                self.close_rail(rail)?;
+                self.pose_grippers(&[(gripper, GripperOrientation::FrameParallelReversed)])?;
+            }
+        }
+
+        self.open_rail(rail)?;
+        self.pose_grippers(&[(gripper, GripperOrientation::FramePerpendicular)])?;
+        self.close_rail(rail)
+    }
+
+    /// Puts logical F at physical right and logical B at physical left, with
+    /// all grippers regripped in perpendicular orientation.
+    fn position_front_back_for_turn(&mut self) -> Result<()> {
+        // Verified F -> L whole-cube turn. With camera-facing F moved to L,
+        // logical F is at physical right and B at physical left.
+        self.open_pair(RailPair::LeftRight)?;
+        self.pose_grippers(&[
+            (StandAxis::TopGripper, GripperOrientation::FrameParallel),
+            (
+                StandAxis::BottomGripper,
+                GripperOrientation::FrameParallelReversed,
+            ),
+        ])?;
+        self.close_pair(RailPair::LeftRight)?;
+        self.open_pair(RailPair::TopBottom)?;
+        self.pose_grippers(&[
+            (
+                StandAxis::TopGripper,
+                GripperOrientation::FramePerpendicular,
+            ),
+            (
+                StandAxis::BottomGripper,
+                GripperOrientation::FramePerpendicular,
+            ),
+        ])?;
+        self.close_pair(RailPair::TopBottom)
+    }
+
+    /// Reverses [`Self::position_front_back_for_turn`] and restores logical F
+    /// to the camera-facing mechanical reference pose.
+    fn restore_front_after_front_back_turn(&mut self) -> Result<()> {
+        self.open_pair(RailPair::LeftRight)?;
+        self.pose_grippers(&[
+            (
+                StandAxis::TopGripper,
+                GripperOrientation::FrameParallelReversed,
+            ),
+            (StandAxis::BottomGripper, GripperOrientation::FrameParallel),
+        ])?;
+        self.close_pair(RailPair::LeftRight)?;
+        self.open_pair(RailPair::TopBottom)?;
+        self.pose_grippers(&[
+            (
+                StandAxis::TopGripper,
+                GripperOrientation::FramePerpendicular,
+            ),
+            (
+                StandAxis::BottomGripper,
+                GripperOrientation::FramePerpendicular,
+            ),
+        ])?;
+        self.close_pair(RailPair::TopBottom)
+    }
+
+    fn open_rail(&mut self, rail: StandAxis) -> Result<()> {
+        self.move_rail(rail, RailPosition::FarOpen)
+    }
+
+    fn close_rail(&mut self, rail: StandAxis) -> Result<()> {
+        self.move_rail(rail, RailPosition::NearGrip)
+    }
+
+    fn move_rail(&mut self, rail: StandAxis, position: RailPosition) -> Result<()> {
+        debug_assert!(!rail.is_gripper());
+        self.set_channels(&[(rail.channel(), self.calibration.rail_pulse(position))])?;
+        self.delay.sleep(self.calibration.rail_duration(position));
+        self.disable_channels(&[rail.channel()])
     }
 
     /// Canonical `F -> R -> B` turn around the top/bottom axis.
@@ -719,6 +866,24 @@ fn gripper_channels_for_axes(
         .collect()
 }
 
+const fn physical_turn_axes(face: PhysicalTurnFace) -> (StandAxis, StandAxis) {
+    match face {
+        PhysicalTurnFace::Left => (StandAxis::LeftGripper, StandAxis::LeftRail),
+        PhysicalTurnFace::Right => (StandAxis::RightGripper, StandAxis::RightRail),
+        PhysicalTurnFace::Top => (StandAxis::TopGripper, StandAxis::TopRail),
+        PhysicalTurnFace::Bottom => (StandAxis::BottomGripper, StandAxis::BottomRail),
+    }
+}
+
+fn move_name(cube_move: CubeMove) -> String {
+    let suffix = match cube_move.turn {
+        MoveTurn::Clockwise => "",
+        MoveTurn::CounterClockwise => "'",
+        MoveTurn::Half => "2",
+    };
+    format!("{}{}", cube_move.face.symbol(), suffix)
+}
+
 fn state_name(state: CommandedStandState) -> &'static str {
     match state {
         CommandedStandState::Unknown => "unknown",
@@ -815,6 +980,7 @@ mod tests {
             runtime.delay.0,
             [
                 Duration::from_millis(1_200),
+                Duration::from_millis(1_200),
                 Duration::from_secs(1),
                 Duration::from_millis(1_200),
             ]
@@ -823,14 +989,15 @@ mod tests {
             runtime.output.events,
             vec![
                 OutputEvent::AllOff,
-                OutputEvent::Set(vec![(4, 2500), (5, 2500), (6, 2500), (7, 2500)]),
+                OutputEvent::Set(vec![(5, 2500), (7, 2500)]),
+                OutputEvent::Set(vec![(4, 2500), (6, 2500)]),
                 OutputEvent::Set(vec![(0, 1500), (1, 1450), (2, 1450), (3, 1450)]),
                 OutputEvent::Set(vec![(4, 1200), (5, 1200), (6, 1200), (7, 1200)]),
             ]
         );
         assert_eq!(
             runtime.output.disabled_channels,
-            [vec![4, 5, 6, 7], vec![4, 5, 6, 7]]
+            [vec![5, 7], vec![4, 6], vec![4, 5, 6, 7]]
         );
     }
 
@@ -862,7 +1029,8 @@ mod tests {
             runtime.output.events,
             vec![
                 OutputEvent::AllOff,
-                OutputEvent::Set(vec![(4, 2500), (5, 2500), (6, 2500), (7, 2500)]),
+                OutputEvent::Set(vec![(5, 2500), (7, 2500)]),
+                OutputEvent::Set(vec![(4, 2500), (6, 2500)]),
                 OutputEvent::Set(vec![(0, 1500), (1, 1450), (2, 1450), (3, 1450)]),
                 OutputEvent::Set(vec![(4, 1200), (5, 1200), (6, 1200), (7, 1200)]),
                 // Top/bottom retains the cube while left/right opens for L.
@@ -870,7 +1038,7 @@ mod tests {
                 OutputEvent::Set(vec![(2, 400), (1, 2500)]),
             ]
         );
-        assert_eq!(runtime.delay.0.len(), 5);
+        assert_eq!(runtime.delay.0.len(), 6);
     }
 
     #[test]
@@ -895,6 +1063,83 @@ mod tests {
             CommandedStandState::ScanHold(ScanFace::Front)
         );
         assert_eq!(runtime.output.events, events_before);
+    }
+
+    #[test]
+    fn direct_probe_move_restores_canonical_grip_after_quarter_turn() {
+        let mut runtime = initialized_runtime(MockOutput::default());
+        runtime.grip().unwrap();
+        let events_before = runtime.output.events.len();
+
+        runtime
+            .execute_probe_move(CubeMove {
+                face: LogicalFace::Left,
+                turn: MoveTurn::Clockwise,
+            })
+            .unwrap();
+
+        assert_eq!(runtime.state(), CommandedStandState::Gripped);
+        assert_eq!(
+            &runtime.output.events[events_before..],
+            [
+                OutputEvent::Set(vec![(3, 2450)]),
+                OutputEvent::Set(vec![(5, 2500)]),
+                OutputEvent::Set(vec![(3, 1450)]),
+                OutputEvent::Set(vec![(5, 1200)]),
+            ]
+        );
+        assert_eq!(&runtime.output.disabled_channels[3..], [vec![5], vec![5]]);
+    }
+
+    #[test]
+    fn half_turn_regrips_parallel_before_measured_p_to_pr_transition() {
+        let mut runtime = initialized_runtime(MockOutput::default());
+        runtime.grip().unwrap();
+        let events_before = runtime.output.events.len();
+
+        runtime
+            .execute_probe_move(CubeMove {
+                face: LogicalFace::Up,
+                turn: MoveTurn::Half,
+            })
+            .unwrap();
+
+        assert_eq!(runtime.state(), CommandedStandState::Gripped);
+        assert_eq!(
+            &runtime.output.events[events_before..],
+            [
+                OutputEvent::Set(vec![(4, 2500)]),
+                OutputEvent::Set(vec![(2, 400)]),
+                OutputEvent::Set(vec![(4, 1200)]),
+                OutputEvent::Set(vec![(2, 2450)]),
+                OutputEvent::Set(vec![(4, 2500)]),
+                OutputEvent::Set(vec![(2, 1450)]),
+                OutputEvent::Set(vec![(4, 1200)]),
+            ]
+        );
+    }
+
+    #[test]
+    fn front_probe_move_uses_right_wrist_and_returns_to_canonical_grip() {
+        let mut runtime = initialized_runtime(MockOutput::default());
+        runtime.grip().unwrap();
+
+        runtime
+            .execute_probe_move(CubeMove {
+                face: LogicalFace::Front,
+                turn: MoveTurn::Clockwise,
+            })
+            .unwrap();
+
+        assert_eq!(runtime.state(), CommandedStandState::Gripped);
+        assert!(runtime
+            .output
+            .events
+            .contains(&OutputEvent::Set(vec![(0, 2500)])));
+        assert_eq!(
+            runtime.output.events.last(),
+            Some(&OutputEvent::Set(vec![(4, 1200), (6, 1200)]))
+        );
     }
 
     #[test]
@@ -1052,7 +1297,8 @@ mod tests {
                 OutputEvent::Set(vec![(4, 2500), (6, 2500)]),
                 OutputEvent::Set(vec![(2, 1450), (1, 1450)]),
                 OutputEvent::Set(vec![(4, 1200), (6, 1200)]),
-                OutputEvent::Set(vec![(4, 2500), (5, 2500), (6, 2500), (7, 2500)]),
+                OutputEvent::Set(vec![(5, 2500), (7, 2500)]),
+                OutputEvent::Set(vec![(4, 2500), (6, 2500)]),
             ]
         );
     }

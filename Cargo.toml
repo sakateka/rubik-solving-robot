@@ -44,6 +44,11 @@ path = "src/bin/rubik-stand-runtime.rs"
 required-features = ["pca9685"]
 
 [[bin]]
+name = "rubik-move-probe"
+path = "src/bin/rubik-move-probe.rs"
+required-features = ["pca9685"]
+
+[[bin]]
 name = "rubik-full-scan"
 path = "src/bin/rubik-full-scan.rs"
 required-features = ["pca9685", "cvi-camera"]

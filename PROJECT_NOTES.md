@@ -1942,7 +1942,7 @@ left/right pair: открыть left/right rails, перевести left grippe
 rails и открыть top/bottom rails. В этой configuration front face открыт для
 camera.
 
-Та же удерживающая left/right pair делает whole-cube turn вокруг оси
+Та же удерживающая left/right pair делает разворот всего cube вокруг оси
 `left↔right`: из этой scan-hold configuration одновременный переход обоих
 grippers в `frame_perpendicular` даёт поворот на 90°: перед camera оказывается
 `U` (top). Противоположный 90° turn даёт `D` (bottom). Переход на 180° через
@@ -1952,7 +1952,7 @@ grippers в `frame_perpendicular` даёт поворот на 90°: перед 
 Для `B` применяется только 180° turn вокруг вертикальной оси `top↔bottom`
 (через последовательность `F → R → B` либо `F → L → B`). Это измеренные
 механические target poses; их нельзя заменять предположением о направлении
-вращения servo. Scan choreography намеренно выбирает только такие whole-cube
+вращения servo. Scan choreography намеренно выбирает только такие развороты всего cube,
 orientations, в которых camera grid уже является канонической facelet-сеткой:
 `F1…F9`, `R1…R9`, `B1…B9` и так далее — без поворота или отражения матрицы в
 software. Для `F → R`, `F → L` и продолжения этих turns соответствие
@@ -1963,7 +1963,7 @@ software. Для `F → R`, `F → L` и продолжения этих turns �
 top/bottom rails, перевести top gripper в `frame_parallel`, bottom gripper в
 `frame_parallel_reversed`, закрыть top/bottom rails и открыть left/right rails.
 Из неё одновременный переход top и bottom grippers в
-`frame_perpendicular` даёт whole-cube turn вокруг оси `top↔bottom`: перед
+`frame_perpendicular` даёт разворот всего cube вокруг оси `top↔bottom`: перед
 camera оказывается `R` (right). Однако это ещё не scan pose: top и bottom
 grippers в `frame_perpendicular` закрывают верхний и нижний средние stickers
 этой face. Чтобы отсканировать `R`, нужен regrip на left/right pair в
@@ -2071,7 +2071,7 @@ transition как минимум одна pair rails непрерывно уде
 
 Первое verified direct edge реализовано в runtime: `ScanHold(F) → ScanHold(U)`.
 После `scan-pose front` команда `scan-next up` переводит удерживающие
-left/right grippers в `frame_perpendicular` (whole-cube turn `F → U`), затем
+left/right grippers в `frame_perpendicular` (разворот всего cube `F → U`), затем
 закрывает top/bottom pair в parallel configuration и только после этого
 открывает left/right rails. На всём transition cube удерживается хотя бы одной
 pair.
@@ -2157,7 +2157,7 @@ servos измерена одна и та же convention:
 
 `P → PR` и `PR → P` на каждой direct face дают `X2`; физическое направление
 пути различается, но результат один. `F/B` напрямую не захватываются в
-front-facing pose: executor сначала должен сделать verified whole-cube
+front-facing pose: executor сначала должен сделать verified разворот всего cube
 reorientation, вывести нужную face на `L/R/U/D`, а затем применить ту же
 direct face primitive.
 
@@ -2175,8 +2175,44 @@ physical `right` или `left` безопасен. Это правило важ�
 пытаться выполнять `F/B` прежними top/bottom orientations, оставшимися от
 разворота всего кубика.
 
-Этот yaw является только временной механической переориентацией. После direct
+Этот разворот является только временной механической переориентацией. После direct
 `F` или `B` turn executor обязан выполнить обратный разворот всего кубика и вернуть
 cube в исходную canonical front-facing orientation. Между solver moves
 orientation cube в стенде не меняется: в logical state остаётся только
 запрошенный `F`/`B` move.
+
+#### One-move mechanical probe
+
+`rubik-move-probe` — отдельный диагностический binary для проверки
+элементарного Singmaster move на реальном стенде. Он не исполняет решение
+solver-а: открывает стенд в safe pose, ждёт Enter после установки cube,
+захватывает его, выполняет ровно один move и оставляет стенд в canonical
+`gripped` pose с `F` снова перед camera. Поддерживаются все `U R F D L B`,
+их inverse (`R'`) и half turns (`R2`).
+
+```sh
+./rubik-move-probe --confirm-stand-motion L
+```
+
+Для проверки нескольких независимых moves в одном удержании используется
+`--sequence`; строку нужно передать shell как один argument:
+
+```sh
+./rubik-move-probe --confirm-stand-motion --sequence "R U R' U'"
+```
+
+После каждого move tool возвращает механический стенд в canonical `gripped`
+pose, поэтому следующий move всегда начинается с `F` перед camera и не зависит
+от временного разворота для предыдущего `F/B`.
+
+Для quarter turn target wrist движется из `frame_perpendicular` в измеренную
+`P` или `PR` pose, затем target rail открывается, wrist возвращается в
+perpendicular без движения cube и rail снова закрывается. Для half turn tool
+сначала открывает target rail, regrip-ится в `P`, закрывает rail и выполняет
+измеренный `P → PR` transition; затем тем же release/regrip возвращает wrist
+в perpendicular. `F/B` используют временный разворот всего cube и обратный
+разворот до завершения команды.
+
+Любое штатное открытие rails выполняется только в двух фазах: сначала
+left/right, затем top/bottom. Пока первая pair открывается, противоположная
+pair удерживает cube. Одновременное открытие всех четырёх rails не допускается.
