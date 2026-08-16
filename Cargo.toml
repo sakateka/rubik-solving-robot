@@ -43,6 +43,11 @@ name = "rubik-stand-runtime"
 path = "src/bin/rubik-stand-runtime.rs"
 required-features = ["pca9685"]
 
+[[bin]]
+name = "rubik-full-scan"
+path = "src/bin/rubik-full-scan.rs"
+required-features = ["pca9685", "cvi-camera"]
+
 [dependencies]
 anyhow = "1"
 candle-core = { version = "0.11.0", default-features = false }

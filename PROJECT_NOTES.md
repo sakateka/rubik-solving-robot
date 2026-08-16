@@ -1967,37 +1967,71 @@ grippers в `frame_perpendicular` закрывают верхний и нижн�
 открыты. Regrip не меняет orientation cube, поэтому canonical order `R1…R9`
 сохраняется и в этой открытой scan pose.
 
-#### Canonical scan choreography: `F → L`
+#### Canonical scan block: `L` and `R`
 
-Ниже — полная последовательность для scan `L`, записанная не как направление
-servo, а как механические состояния стенда. Исходное состояние всегда одно:
-после `grip` все четыре rails находятся в `near/grip`, все четыре grippers — в
-`frame_perpendicular`, перед camera находится `F`.
+Исходное состояние — `grip`: все rails находятся в `near/grip`, все grippers
+в `frame_perpendicular`, перед camera находится `F`. Для `L/R` cube всё время
+держит top/bottom pair; left/right rails открыты для camera.
 
-1. Открыть top/bottom rails (`far/open`) и дождаться `timing.rails_open_ms`.
-   Left/right pair всё это время удерживает cube.
-2. Только после полного открытия rails перевести top gripper в
-   `frame_parallel_reversed`, bottom gripper — в `frame_parallel`; дождаться
-   `timing.gripper_pose_ms`.
-3. Закрыть top/bottom rails (`near/grip`) и дождаться
-   `timing.rails_grip_ms`: теперь cube удерживается top/bottom pair в
-   подготовленной orientation.
-4. Открыть left/right rails и дождаться `timing.rails_open_ms`.
-5. Одновременно перевести top и bottom grippers в `frame_perpendicular`.
-   Cube совершает whole-cube turn `F → L`, но удерживающие top/bottom grippers
-   закрывают central stickers новой camera-facing face.
-6. Left/right rails уже полностью открыты, поэтому перевести left gripper в
-   `frame_parallel`, right gripper — в `frame_parallel_reversed`; дождаться
-   `timing.gripper_pose_ms`. Top/bottom остаются в `frame_perpendicular` и
-   продолжают удерживать cube.
-7. Закрыть left/right rails и дождаться `timing.rails_grip_ms`.
-8. Открыть top/bottom rails и дождаться `timing.rails_open_ms`.
+1. Открыть left/right rails (`far/open`) и дождаться `timing.rails_open_ms`.
+2. `top = frame_parallel`, `bottom = frame_parallel_reversed` даёт открытую
+   canonical `L` face: camera grid прямо соответствует `L1…L9`.
+3. Вернуть top/bottom grippers в `frame_perpendicular`: это скрытая
+   `Front` reference pose, из которой cube не сканируется, но остаётся
+   удержанным top/bottom pair.
+4. `top = frame_parallel_reversed`, `bottom = frame_parallel` даёт открытую
+   canonical `R` face: camera grid прямо соответствует `R1…R9`.
+5. Возврат из `R` в скрытую `Front` reference pose: одновременно перевести
+   top и bottom grippers в `frame_perpendicular`. Rails не меняются; cube всё
+   ещё удерживается top/bottom pair. Это не `ScanHold(F)`: top/bottom grippers
+   частично закрывают `F`, поэтому scan в этой pose не выполняется.
 
-После шага 8 `L` смотрит в camera, видны все девять stickers, а cube
-удерживается left/right pair. Camera grid напрямую соответствует `L1…L9`;
-software не поворачивает и не отражает матрицу. `F → R` имеет ту же структуру,
-но подготовительная top/bottom orientation обратна: `top = frame_parallel`,
-`bottom = frame_parallel_reversed`.
+Переходы `grip → L` и `L → R` проверены на стенде через
+`scan-pose left`, затем `scan-next right`. Во время них rails не создают
+состояния без удержания cube.
+
+#### Canonical scan block: `D` and `U`
+
+Этот block начинается из скрытой `FrontReference(top/bottom)` после возврата
+из `R`: top/bottom rails удерживают cube, их grippers находятся в
+`frame_perpendicular`, left/right rails открыты и их grippers также остаются
+в `frame_perpendicular`.
+
+1. Закрыть left/right rails (`near/grip`), не меняя gripper poses: теперь cube
+   удерживается обеими pairs в безопасной perpendicular configuration.
+2. Открыть top/bottom rails (`far/open`): cube непрерывно удерживает left/right
+   pair, и camera получает доступ к верхней и нижней faces.
+3. `left = frame_parallel`, `right = frame_parallel_reversed` даёт открытую
+   canonical `D` face (`D1…D9`).
+4. Вернуть left/right в `frame_perpendicular`: это скрытая
+   `FrontReference(left/right)`.
+5. `left = frame_parallel_reversed`, `right = frame_parallel` даёт открытую
+   canonical `U` face (`U1…U9`).
+6. Возврат из `U` в скрытую `FrontReference(left/right)`: одновременно
+   перевести left и right grippers в `frame_perpendicular`. Rails не меняются;
+   `F` снова перед camera, но left/right grippers частично её закрывают.
+
+Как и в `L/R` block, для возврата между endpoint-ами используется
+perpendicular reference pose, а не локальный переход между произвольными
+camera-facing faces.
+
+#### Canonical scan block: `F` and `B`
+
+Этот block начинается из скрытой `FrontReference(left/right)` после возврата
+из `U`: left/right pair удерживает cube в `frame_perpendicular`, top/bottom
+rails открыты.
+
+1. Пока left/right остаются perpendicular, перевести `top = frame_parallel`,
+   `bottom = frame_parallel_reversed`.
+2. Закрыть top/bottom rails (`near/grip`), затем открыть left/right rails
+   (`far/open`). Перед открытием old holding pair новая pair уже удерживает
+   cube.
+3. Получается открытая canonical `F` face (`F1…F9`).
+4. Не двигая rails, перевести `top = frame_parallel_reversed`,
+   `bottom = frame_parallel`: получается открытая canonical `B` face
+   (`B1…B9`).
+
+Так завершается полный обход всех шести faces: `L → R → D → U → F → B`.
 
 #### Runtime probe: canonical scan poses
 
@@ -2036,5 +2070,49 @@ transition как минимум одна pair rails непрерывно уде
 left/right grippers в `frame_perpendicular` (whole-cube turn `F → U`), затем
 закрывает top/bottom pair в parallel configuration и только после этого
 открывает left/right rails. На всём transition cube удерживается хотя бы одной
-pair. Остальные edges добавляются только после такого же явного описания и
-hardware validation.
+pair.
+
+Для полного scan нельзя выбирать следующий transition только по текущей
+camera-facing face: так можно получить нужную face в неверной canonical
+orientation. Каждая целевая scan pose должна быть достигнута относительно
+механической reference pose `Front`.
+
+Рабочая стратегия группирует scans по удерживающей pair. Из `grip` можно
+открыть left/right rails и, меняя positions top/bottom grippers, получить
+канонические `L` и `R`. Затем механика возвращается в reference `Front` и
+переходит к паре, с которой сканируются `F` и `B`. После ещё одного возврата
+в `Front` с perpendicular holding configuration доступны `U` и `D`.
+Порядок групп (`L/R` до `F/B` или наоборот) не важен; важно возвращаться в
+reference pose между группами и не отпускать cube. Неподтверждённые локальные
+edges, например `U → L`, в runtime не добавляются.
+
+#### Full scan: stand → camera → TPU → color facelet
+
+`rubik-full-scan` соединяет уже отдельно проверенные stand runtime, GC2083/VPSS
+и TPU detector в один interactive flow. При запуске он инициализирует PCA9685,
+немедленно переводит стенд в `safe-open`, открывает camera один раз, отбрасывает
+начальные VPSS warm-up frames и загружает `.cvimodel` один раз.
+
+Команда `scan` разрешена только из `safe-open` и выполняет canonical sequence
+`grip → L → R → D → U → F → B`. После каждого camera-open pose берётся один
+320×320 VPSS RGB frame, к нему применяется тот же ROI preprocessing, confidence
+filter, center-window filter и class-agnostic NMS, что у `rubik-scan --camera`.
+Требование ровно девяти detections сохраняется: при другом числе scan
+останавливается, не строя выдуманную грань.
+
+После шести успешных frames tool печатает цветную развёртку в физических
+буквах `W/Y/R/O/G/B`, затем ту же последовательность в порядке `URFDLB` и
+solver facelet. Последний строится только после проверки, что каждый цвет
+встречается ровно девять раз, а центры шести faces различны. Таким образом
+цветная развёртка — материал для ручной сверки с кубом, а solver facelet —
+машинная проверка того же набора scans.
+
+```sh
+./rubik-full-scan --confirm-stand-motion --cvimodel /mnt/storage/cube_yolov8n_320_bf16.cvimodel
+```
+
+Внутри процесса доступны `scan`, `state`, `off`, `quit`. После обычного
+успешного scan cube остаётся удержанным в `B` scan pose; повторный scan требует
+явного физического восстановления и нового запуска процесса. Если detection
+или camera operation завершается ошибкой, tool не вызывает автоматический
+`safe-open`: operator видит ошибку и сам выбирает `off`/`quit`.

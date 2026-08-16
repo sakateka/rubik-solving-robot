@@ -5,9 +5,9 @@
 //! stand. With a heavily tilted camera, row clustering would be needed
 //! (see PROJECT_NOTES.md, "Pitfalls").
 
+use crate::cube::Face;
 use crate::{model::CLASS_COLORS, postprocess::Detection};
 use anyhow::{bail, Context, Result};
-use rubik_scan::cube::Face;
 use std::fmt;
 
 /// Recognized face: 3x3 color symbols ('W', 'Y', 'R', 'O', 'G', 'B').

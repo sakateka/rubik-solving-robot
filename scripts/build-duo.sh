@@ -56,4 +56,4 @@ cd "$project_root"
 exec cargo build --release --target "$target" --features cvi-camera,pca9685 \
   --bin rubik-scan --bin rubik-camera-probe --bin rubik-solve \
   --bin rubik-servo-probe --bin rubik-servo-init --bin rubik-servo-calibrate \
-  --bin rubik-stand --bin rubik-stand-runtime "$@"
+  --bin rubik-stand --bin rubik-stand-runtime --bin rubik-full-scan "$@"

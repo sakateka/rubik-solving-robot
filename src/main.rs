@@ -6,19 +6,13 @@
 //! Stage 1: PC prototype, reads a photo from disk.
 
 mod capture;
-mod grid;
-mod model;
-mod postprocess;
-mod preprocess;
-#[cfg(feature = "cvi-runtime")]
-mod tpu;
-mod yolo_v8;
-
 use anyhow::{bail, Result};
 use clap::Parser;
-use model::Detector;
 #[cfg(feature = "cvi-camera")]
 use rubik_scan::camera;
+#[cfg(feature = "cvi-runtime")]
+use rubik_scan::tpu;
+use rubik_scan::{grid, model, model::Detector, postprocess, preprocess};
 #[cfg(feature = "cvi-camera")]
 use std::ffi::CString;
 use std::{

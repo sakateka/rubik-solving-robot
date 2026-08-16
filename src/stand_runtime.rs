@@ -54,18 +54,16 @@ impl ScanFace {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum RailPair {
     LeftRight,
     TopBottom,
 }
 
-/// Canonical whole-cube turns around the vertical top/bottom axis.
 #[derive(Clone, Copy)]
-enum VerticalTurn {
+enum Side {
     Left,
     Right,
-    Back,
 }
 
 pub trait Delay {
@@ -87,6 +85,7 @@ pub struct StandRuntime<D, T = ThreadDelay> {
     calibration: StandCalibration,
     delay: T,
     state: CommandedStandState,
+    holding_pair: Option<RailPair>,
 }
 
 impl<D> StandRuntime<D, ThreadDelay>
@@ -109,6 +108,7 @@ where
             calibration,
             delay,
             state: CommandedStandState::Unknown,
+            holding_pair: None,
         }
     }
 
@@ -121,6 +121,7 @@ where
         match self.output.all_off() {
             Ok(()) => {
                 self.state = CommandedStandState::OutputsOff;
+                self.holding_pair = None;
                 Ok(())
             }
             Err(error) => self.fault("failed to disable PCA9685 outputs during reset", error),
@@ -147,6 +148,7 @@ where
         self.delay.sleep(self.calibration.gripper_pose_duration());
 
         self.state = CommandedStandState::SafeOpen;
+        self.holding_pair = None;
         Ok(())
     }
 
@@ -164,6 +166,7 @@ where
         self.delay
             .sleep(self.calibration.rail_duration(RailPosition::NearGrip));
         self.state = CommandedStandState::Gripped;
+        self.holding_pair = None;
         Ok(())
     }
 
@@ -184,24 +187,37 @@ where
 
         match face {
             ScanFace::Front => self.regrip_left_right_for_scan()?,
-            ScanFace::Left => self.vertical_turn(VerticalTurn::Left)?,
-            ScanFace::Right => self.vertical_turn(VerticalTurn::Right)?,
+            ScanFace::Left => self.side_scan_from_grip(Side::Left)?,
+            ScanFace::Right => self.side_scan_from_grip(Side::Right)?,
             ScanFace::Up => self.horizontal_turn_to_up()?,
             ScanFace::Down => self.horizontal_turn_to_down()?,
-            ScanFace::Back => self.vertical_turn(VerticalTurn::Back)?,
-        }
+            ScanFace::Back => self.vertical_turn_to_back()?,
+        };
+        let holding_pair = match face {
+            ScanFace::Front => RailPair::LeftRight,
+            ScanFace::Left | ScanFace::Right | ScanFace::Up | ScanFace::Down | ScanFace::Back => {
+                RailPair::TopBottom
+            }
+        };
         self.state = CommandedStandState::ScanHold(face);
+        self.holding_pair = Some(holding_pair);
         Ok(())
     }
 
     /// Performs one verified direct transition between camera-open scan poses.
     ///
     /// Unlike [`Self::scan_pose`], this never invokes `grip` or `safe_open`.
-    /// The cube remains held by left/right while it turns, then by top/bottom
-    /// before left/right rails open.
+    /// The private holding-pair tag distinguishes mechanically different
+    /// camera poses with the same face name. In particular, `Front` may be
+    /// held by left/right in a diagnostic pose or by top/bottom in the
+    /// canonical scan flow; only the latter can continue to `Back`.
     pub fn scan_next(&mut self, next: ScanFace) -> Result<()> {
-        match (self.state, next) {
-            (CommandedStandState::ScanHold(ScanFace::Front), ScanFace::Up) => {
+        match (self.state, self.holding_pair, next) {
+            (
+                CommandedStandState::ScanHold(ScanFace::Front),
+                Some(RailPair::LeftRight),
+                ScanFace::Up,
+            ) => {
                 self.pose_grippers(&[
                     (
                         StandAxis::LeftGripper,
@@ -213,15 +229,139 @@ where
                     ),
                 ])?;
                 self.regrip_top_bottom_for_scan()?;
-                self.state = CommandedStandState::ScanHold(ScanFace::Up);
+                self.set_scan_hold(ScanFace::Up, RailPair::TopBottom);
                 Ok(())
             }
-            (CommandedStandState::ScanHold(current), _) => anyhow::bail!(
-                "no verified direct scan transition from {} to {}",
+            (
+                CommandedStandState::ScanHold(ScanFace::Left),
+                Some(RailPair::TopBottom),
+                ScanFace::Right,
+            ) => {
+                self.pose_grippers(&[
+                    (
+                        StandAxis::TopGripper,
+                        GripperOrientation::FramePerpendicular,
+                    ),
+                    (
+                        StandAxis::BottomGripper,
+                        GripperOrientation::FramePerpendicular,
+                    ),
+                ])?;
+                self.pose_grippers(&[
+                    (
+                        StandAxis::TopGripper,
+                        GripperOrientation::FrameParallelReversed,
+                    ),
+                    (StandAxis::BottomGripper, GripperOrientation::FrameParallel),
+                ])?;
+                self.set_scan_hold(ScanFace::Right, RailPair::TopBottom);
+                Ok(())
+            }
+            (
+                CommandedStandState::ScanHold(ScanFace::Right),
+                Some(RailPair::TopBottom),
+                ScanFace::Down,
+            ) => {
+                // Return to FrontReference(top/bottom), then hand the cube to
+                // left/right before top/bottom rails open.
+                self.pose_grippers(&[
+                    (
+                        StandAxis::TopGripper,
+                        GripperOrientation::FramePerpendicular,
+                    ),
+                    (
+                        StandAxis::BottomGripper,
+                        GripperOrientation::FramePerpendicular,
+                    ),
+                ])?;
+                self.close_pair(RailPair::LeftRight)?;
+                self.open_pair(RailPair::TopBottom)?;
+                self.pose_grippers(&[
+                    (StandAxis::LeftGripper, GripperOrientation::FrameParallel),
+                    (
+                        StandAxis::RightGripper,
+                        GripperOrientation::FrameParallelReversed,
+                    ),
+                ])?;
+                self.set_scan_hold(ScanFace::Down, RailPair::LeftRight);
+                Ok(())
+            }
+            (
+                CommandedStandState::ScanHold(ScanFace::Down),
+                Some(RailPair::LeftRight),
+                ScanFace::Up,
+            ) => {
+                self.pose_grippers(&[
+                    (
+                        StandAxis::LeftGripper,
+                        GripperOrientation::FramePerpendicular,
+                    ),
+                    (
+                        StandAxis::RightGripper,
+                        GripperOrientation::FramePerpendicular,
+                    ),
+                ])?;
+                self.pose_grippers(&[
+                    (
+                        StandAxis::LeftGripper,
+                        GripperOrientation::FrameParallelReversed,
+                    ),
+                    (StandAxis::RightGripper, GripperOrientation::FrameParallel),
+                ])?;
+                self.set_scan_hold(ScanFace::Up, RailPair::LeftRight);
+                Ok(())
+            }
+            (
+                CommandedStandState::ScanHold(ScanFace::Up),
+                Some(RailPair::LeftRight),
+                ScanFace::Front,
+            ) => {
+                // Return to FrontReference(left/right), then hand the cube to
+                // top/bottom before left/right rails open.
+                self.pose_grippers(&[
+                    (
+                        StandAxis::LeftGripper,
+                        GripperOrientation::FramePerpendicular,
+                    ),
+                    (
+                        StandAxis::RightGripper,
+                        GripperOrientation::FramePerpendicular,
+                    ),
+                ])?;
+                self.pose_grippers(&[
+                    (StandAxis::TopGripper, GripperOrientation::FrameParallel),
+                    (
+                        StandAxis::BottomGripper,
+                        GripperOrientation::FrameParallelReversed,
+                    ),
+                ])?;
+                self.close_pair(RailPair::TopBottom)?;
+                self.open_pair(RailPair::LeftRight)?;
+                self.set_scan_hold(ScanFace::Front, RailPair::TopBottom);
+                Ok(())
+            }
+            (
+                CommandedStandState::ScanHold(ScanFace::Front),
+                Some(RailPair::TopBottom),
+                ScanFace::Back,
+            ) => {
+                self.pose_grippers(&[
+                    (
+                        StandAxis::TopGripper,
+                        GripperOrientation::FrameParallelReversed,
+                    ),
+                    (StandAxis::BottomGripper, GripperOrientation::FrameParallel),
+                ])?;
+                self.set_scan_hold(ScanFace::Back, RailPair::TopBottom);
+                Ok(())
+            }
+            (CommandedStandState::ScanHold(current), holding_pair, _) => anyhow::bail!(
+                "no verified direct scan transition from {} ({}) to {}",
                 current.name(),
+                holding_pair.map(rail_pair_name).unwrap_or("unknown holder"),
                 next.name()
             ),
-            (state, _) => anyhow::bail!(
+            (state, _, _) => anyhow::bail!(
                 "cannot transition to scan pose {}: current state is {}",
                 next.name(),
                 state_name(state)
@@ -231,6 +371,11 @@ where
 
     pub fn into_inner(self) -> D {
         self.output
+    }
+
+    fn set_scan_hold(&mut self, face: ScanFace, holding_pair: RailPair) {
+        self.state = CommandedStandState::ScanHold(face);
+        self.holding_pair = Some(holding_pair);
     }
 
     fn require_operational(&self, operation: &str) -> Result<()> {
@@ -283,22 +428,15 @@ where
         Ok(())
     }
 
-    /// `F -> L`, `F -> R`, or canonical `F -> R -> B` around top/bottom.
-    fn vertical_turn(&mut self, turn: VerticalTurn) -> Result<()> {
+    /// Canonical `F -> R -> B` turn around the top/bottom axis.
+    fn vertical_turn_to_back(&mut self) -> Result<()> {
         self.open_pair(RailPair::TopBottom)?;
-        let (top, bottom) = match turn {
-            VerticalTurn::Right | VerticalTurn::Back => (
-                GripperOrientation::FrameParallel,
-                GripperOrientation::FrameParallelReversed,
-            ),
-            VerticalTurn::Left => (
-                GripperOrientation::FrameParallelReversed,
-                GripperOrientation::FrameParallel,
-            ),
-        };
         self.pose_grippers(&[
-            (StandAxis::TopGripper, top),
-            (StandAxis::BottomGripper, bottom),
+            (StandAxis::TopGripper, GripperOrientation::FrameParallel),
+            (
+                StandAxis::BottomGripper,
+                GripperOrientation::FrameParallelReversed,
+            ),
         ])?;
         self.close_pair(RailPair::TopBottom)?;
         self.open_pair(RailPair::LeftRight)?;
@@ -313,19 +451,34 @@ where
             ),
         ])?;
 
-        match turn {
-            // The side face is still obscured by top/bottom. Regrip on left/right.
-            VerticalTurn::Left | VerticalTurn::Right => self.enter_left_right_scan_hold(),
-            // Continue the same vertical turn from R to B. Parallel top/bottom
-            // grippers leave B open, so no additional regrip is needed.
-            VerticalTurn::Back => self.pose_grippers(&[
-                (
-                    StandAxis::TopGripper,
-                    GripperOrientation::FrameParallelReversed,
-                ),
-                (StandAxis::BottomGripper, GripperOrientation::FrameParallel),
-            ]),
-        }
+        // Continue the same turn from R to B. Parallel top/bottom grippers
+        // leave B open, so no additional regrip is needed.
+        self.pose_grippers(&[
+            (
+                StandAxis::TopGripper,
+                GripperOrientation::FrameParallelReversed,
+            ),
+            (StandAxis::BottomGripper, GripperOrientation::FrameParallel),
+        ])
+    }
+
+    /// Opens left/right rails and scans a side while top/bottom keeps holding.
+    fn side_scan_from_grip(&mut self, side: Side) -> Result<()> {
+        self.open_pair(RailPair::LeftRight)?;
+        let (top, bottom) = match side {
+            Side::Right => (
+                GripperOrientation::FrameParallelReversed,
+                GripperOrientation::FrameParallel,
+            ),
+            Side::Left => (
+                GripperOrientation::FrameParallel,
+                GripperOrientation::FrameParallelReversed,
+            ),
+        };
+        self.pose_grippers(&[
+            (StandAxis::TopGripper, top),
+            (StandAxis::BottomGripper, bottom),
+        ])
     }
 
     /// Opens the camera view while retaining the cube with left/right.
@@ -504,6 +657,13 @@ fn state_name(state: CommandedStandState) -> &'static str {
     }
 }
 
+const fn rail_pair_name(pair: RailPair) -> &'static str {
+    match pair {
+        RailPair::LeftRight => "left/right holder",
+        RailPair::TopBottom => "top/bottom holder",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -606,7 +766,7 @@ mod tests {
     }
 
     #[test]
-    fn left_scan_pose_follows_the_verified_regrip_sequence() {
+    fn left_scan_pose_opens_left_right_and_uses_top_bottom_endpoints() {
         let mut runtime = initialized_runtime(MockOutput::default());
         runtime.grip().unwrap();
         runtime.scan_pose(ScanFace::Left).unwrap();
@@ -622,19 +782,12 @@ mod tests {
                 OutputEvent::Set(vec![(4, 2500), (5, 2500), (6, 2500), (7, 2500)]),
                 OutputEvent::Set(vec![(0, 1500), (1, 1450), (2, 1450), (3, 1450)]),
                 OutputEvent::Set(vec![(4, 1200), (5, 1200), (6, 1200), (7, 1200)]),
-                // Open top/bottom, prepare their reverse holding pose, and turn F -> L.
-                OutputEvent::Set(vec![(4, 2500), (6, 2500)]),
-                OutputEvent::Set(vec![(2, 2450), (1, 400)]),
-                OutputEvent::Set(vec![(4, 1200), (6, 1200)]),
+                // Top/bottom retains the cube while left/right opens for L.
                 OutputEvent::Set(vec![(5, 2500), (7, 2500)]),
-                OutputEvent::Set(vec![(2, 1450), (1, 1450)]),
-                // Regrip left/right so the camera can see all nine L stickers.
-                OutputEvent::Set(vec![(3, 400), (0, 2500)]),
-                OutputEvent::Set(vec![(5, 1200), (7, 1200)]),
-                OutputEvent::Set(vec![(4, 2500), (6, 2500)]),
+                OutputEvent::Set(vec![(2, 400), (1, 2500)]),
             ]
         );
-        assert_eq!(runtime.delay.0.len(), 11);
+        assert_eq!(runtime.delay.0.len(), 5);
     }
 
     #[test]
@@ -680,5 +833,116 @@ mod tests {
                 OutputEvent::Set(vec![(5, 2500), (7, 2500)]),
             ]
         );
+    }
+
+    #[test]
+    fn scan_next_from_right_to_down_regrips_before_opening_top_bottom() {
+        let mut runtime = initialized_runtime(MockOutput::default());
+        runtime.grip().unwrap();
+        runtime.scan_pose(ScanFace::Left).unwrap();
+        runtime.scan_next(ScanFace::Right).unwrap();
+        let events_before = runtime.output.events.len();
+
+        runtime.scan_next(ScanFace::Down).unwrap();
+
+        assert_eq!(
+            runtime.state(),
+            CommandedStandState::ScanHold(ScanFace::Down)
+        );
+        assert_eq!(
+            &runtime.output.events[events_before..],
+            [
+                OutputEvent::Set(vec![(2, 1450), (1, 1450)]),
+                OutputEvent::Set(vec![(5, 1200), (7, 1200)]),
+                OutputEvent::Set(vec![(4, 2500), (6, 2500)]),
+                OutputEvent::Set(vec![(3, 400), (0, 2500)]),
+            ]
+        );
+    }
+
+    #[test]
+    fn scan_next_from_down_to_up_returns_through_front_reference() {
+        let mut runtime = initialized_runtime(MockOutput::default());
+        runtime.grip().unwrap();
+        runtime.scan_pose(ScanFace::Left).unwrap();
+        runtime.scan_next(ScanFace::Right).unwrap();
+        runtime.scan_next(ScanFace::Down).unwrap();
+        let events_before = runtime.output.events.len();
+
+        runtime.scan_next(ScanFace::Up).unwrap();
+
+        assert_eq!(runtime.state(), CommandedStandState::ScanHold(ScanFace::Up));
+        assert_eq!(
+            &runtime.output.events[events_before..],
+            [
+                OutputEvent::Set(vec![(3, 1450), (0, 1500)]),
+                OutputEvent::Set(vec![(3, 2450), (0, 450)]),
+            ]
+        );
+    }
+
+    #[test]
+    fn scan_next_from_up_to_front_regrips_before_opening_left_right() {
+        let mut runtime = initialized_runtime(MockOutput::default());
+        runtime.grip().unwrap();
+        runtime.scan_pose(ScanFace::Left).unwrap();
+        runtime.scan_next(ScanFace::Right).unwrap();
+        runtime.scan_next(ScanFace::Down).unwrap();
+        runtime.scan_next(ScanFace::Up).unwrap();
+        let events_before = runtime.output.events.len();
+
+        runtime.scan_next(ScanFace::Front).unwrap();
+
+        assert_eq!(
+            runtime.state(),
+            CommandedStandState::ScanHold(ScanFace::Front)
+        );
+        assert_eq!(
+            &runtime.output.events[events_before..],
+            [
+                OutputEvent::Set(vec![(3, 1450), (0, 1500)]),
+                OutputEvent::Set(vec![(2, 400), (1, 2500)]),
+                OutputEvent::Set(vec![(4, 1200), (6, 1200)]),
+                OutputEvent::Set(vec![(5, 2500), (7, 2500)]),
+            ]
+        );
+    }
+
+    #[test]
+    fn scan_next_from_front_to_back_keeps_top_bottom_holding() {
+        let mut runtime = initialized_runtime(MockOutput::default());
+        runtime.grip().unwrap();
+        runtime.scan_pose(ScanFace::Left).unwrap();
+        runtime.scan_next(ScanFace::Right).unwrap();
+        runtime.scan_next(ScanFace::Down).unwrap();
+        runtime.scan_next(ScanFace::Up).unwrap();
+        runtime.scan_next(ScanFace::Front).unwrap();
+        let events_before = runtime.output.events.len();
+
+        runtime.scan_next(ScanFace::Back).unwrap();
+
+        assert_eq!(
+            runtime.state(),
+            CommandedStandState::ScanHold(ScanFace::Back)
+        );
+        assert_eq!(
+            &runtime.output.events[events_before..],
+            [OutputEvent::Set(vec![(2, 2450), (1, 400)])]
+        );
+    }
+
+    #[test]
+    fn scan_next_refuses_back_from_diagnostic_front_pose() {
+        let mut runtime = initialized_runtime(MockOutput::default());
+        runtime.grip().unwrap();
+        runtime.scan_pose(ScanFace::Front).unwrap();
+        let events_before = runtime.output.events.clone();
+
+        assert!(runtime.scan_next(ScanFace::Back).is_err());
+        assert_eq!(
+            runtime.state(),
+            CommandedStandState::ScanHold(ScanFace::Front)
+        );
+        assert_eq!(runtime.output.events, events_before);
     }
 }

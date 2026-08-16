@@ -6,8 +6,15 @@
 #[cfg(feature = "cvi-camera")]
 pub mod camera;
 pub mod cube;
+pub mod grid;
+pub mod model;
 #[cfg(feature = "pca9685")]
 pub mod pca9685;
+pub mod postprocess;
+pub mod preprocess;
 pub mod stand;
 #[cfg(feature = "pca9685")]
 pub mod stand_runtime;
+#[cfg(feature = "cvi-runtime")]
+pub mod tpu;
+mod yolo_v8;
