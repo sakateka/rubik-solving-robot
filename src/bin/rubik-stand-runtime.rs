@@ -70,7 +70,7 @@ fn main() -> Result<()> {
     runtime.reset()?;
 
     println!(
-        "runtime ready pwm_hz={:.3} state={}; commands: state, safe-open, grip, scan-pose <front|left|right|up|down|back>, off, reset, quit",
+        "runtime ready pwm_hz={:.3} state={}; commands: state, safe-open, grip, scan-pose <face>, scan-next <face>, off, reset, quit",
         status.pwm_hz(),
         state_name(runtime.state())
     );
@@ -106,7 +106,7 @@ fn command_loop(runtime: &mut StandRuntime<Pca9685>) -> Result<()> {
         match command {
             "" => {}
             "help" => println!(
-                "commands: state, safe-open, grip, scan-pose <front|left|right|up|down|back>, off, reset, quit"
+                "commands: state, safe-open, grip, scan-pose <face>, scan-next <face>, off, reset, quit; faces: front, left, right, up, down, back"
             ),
             "state" => println!("state={}", state_name(runtime.state())),
             "safe-open" => {
@@ -120,6 +120,13 @@ fn command_loop(runtime: &mut StandRuntime<Pca9685>) -> Result<()> {
             _ if command.starts_with("scan-pose") => match parse_scan_pose(command) {
                 Ok(face) => {
                     let result = runtime.scan_pose(face);
+                    report_motion(result, runtime.state());
+                }
+                Err(error) => eprintln!("{error}"),
+            },
+            _ if command.starts_with("scan-next") => match parse_scan_pose(command) {
+                Ok(face) => {
+                    let result = runtime.scan_next(face);
                     report_motion(result, runtime.state());
                 }
                 Err(error) => eprintln!("{error}"),
@@ -174,10 +181,10 @@ fn parse_scan_pose(command: &str) -> Result<ScanFace, String> {
     let mut parts = command.split_whitespace();
     let _ = parts.next();
     let Some(face) = parts.next() else {
-        return Err("usage: scan-pose <front|left|right|up|down|back>".to_owned());
+        return Err("usage: scan-pose|scan-next <front|left|right|up|down|back>".to_owned());
     };
     if parts.next().is_some() {
-        return Err("usage: scan-pose <front|left|right|up|down|back>".to_owned());
+        return Err("usage: scan-pose|scan-next <front|left|right|up|down|back>".to_owned());
     }
     match face {
         "front" | "f" => Ok(ScanFace::Front),

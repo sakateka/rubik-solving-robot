@@ -153,6 +153,12 @@ where
     /// Always starts from `safe_open`, then closes rails while retaining PWM on
     /// all four grippers.
     pub fn grip(&mut self) -> Result<()> {
+        if let CommandedStandState::ScanHold(face) = self.state {
+            anyhow::bail!(
+                "cannot grip from scan-hold {}: it would open the only rails holding the cube",
+                face.name()
+            );
+        }
         self.safe_open()?;
         self.set_channels(&rail_channels(&self.calibration, RailPosition::NearGrip))?;
         self.delay
@@ -186,6 +192,41 @@ where
         }
         self.state = CommandedStandState::ScanHold(face);
         Ok(())
+    }
+
+    /// Performs one verified direct transition between camera-open scan poses.
+    ///
+    /// Unlike [`Self::scan_pose`], this never invokes `grip` or `safe_open`.
+    /// The cube remains held by left/right while it turns, then by top/bottom
+    /// before left/right rails open.
+    pub fn scan_next(&mut self, next: ScanFace) -> Result<()> {
+        match (self.state, next) {
+            (CommandedStandState::ScanHold(ScanFace::Front), ScanFace::Up) => {
+                self.pose_grippers(&[
+                    (
+                        StandAxis::LeftGripper,
+                        GripperOrientation::FramePerpendicular,
+                    ),
+                    (
+                        StandAxis::RightGripper,
+                        GripperOrientation::FramePerpendicular,
+                    ),
+                ])?;
+                self.regrip_top_bottom_for_scan()?;
+                self.state = CommandedStandState::ScanHold(ScanFace::Up);
+                Ok(())
+            }
+            (CommandedStandState::ScanHold(current), _) => anyhow::bail!(
+                "no verified direct scan transition from {} to {}",
+                current.name(),
+                next.name()
+            ),
+            (state, _) => anyhow::bail!(
+                "cannot transition to scan pose {}: current state is {}",
+                next.name(),
+                state_name(state)
+            ),
+        }
     }
 
     pub fn into_inner(self) -> D {
@@ -603,5 +644,41 @@ mod tests {
         assert!(runtime.scan_pose(ScanFace::Right).is_err());
         assert_eq!(runtime.state(), CommandedStandState::OutputsOff);
         assert_eq!(runtime.output.events, vec![OutputEvent::AllOff]);
+    }
+
+    #[test]
+    fn grip_is_rejected_from_scan_hold_without_commanding_any_motion() {
+        let mut runtime = initialized_runtime(MockOutput::default());
+        runtime.grip().unwrap();
+        runtime.scan_pose(ScanFace::Front).unwrap();
+        let events_before = runtime.output.events.clone();
+
+        assert!(runtime.grip().is_err());
+        assert_eq!(
+            runtime.state(),
+            CommandedStandState::ScanHold(ScanFace::Front)
+        );
+        assert_eq!(runtime.output.events, events_before);
+    }
+
+    #[test]
+    fn scan_next_from_front_to_up_never_releases_the_cube() {
+        let mut runtime = initialized_runtime(MockOutput::default());
+        runtime.grip().unwrap();
+        runtime.scan_pose(ScanFace::Front).unwrap();
+        let events_before = runtime.output.events.len();
+
+        runtime.scan_next(ScanFace::Up).unwrap();
+
+        assert_eq!(runtime.state(), CommandedStandState::ScanHold(ScanFace::Up));
+        assert_eq!(
+            &runtime.output.events[events_before..],
+            [
+                OutputEvent::Set(vec![(3, 1450), (0, 1500)]),
+                OutputEvent::Set(vec![(2, 400), (1, 2500)]),
+                OutputEvent::Set(vec![(4, 1200), (6, 1200)]),
+                OutputEvent::Set(vec![(5, 2500), (7, 2500)]),
+            ]
+        );
     }
 }

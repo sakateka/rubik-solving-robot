@@ -2019,5 +2019,22 @@ configuration для визуального осмотра. Перед ней о
 исходной `F`; `back` строится только вертикальным маршрутом `F → R → B`.
 Внутренние mock tests проверяют полный PWM command trace для `left` и запрещают
 `scan-pose`, если runtime не находится в initial `gripped` state. Каждая
-реальная цель должна быть отдельно проверена на стенде до использования в
-будущей автоматической scan choreography.
+реальная цель проверена на стенде: все шесть `scan-pose` дают ожидаемую
+camera-facing face.
+
+`scan-pose` — одношаговый diagnostic probe, поэтому его нельзя использовать
+как составную часть будущего scan flow. Например, после `scan-pose front` cube
+удерживается только left/right pair; вызов общего `grip` открывает rails для
+перезахвата и cube падает. Runtime поэтому явно запрещает `grip` из любого
+`ScanHold` без отправки PWM commands. Полный scan choreography обязан планировать
+direct transitions между scan-hold configurations без промежуточного `grip`,
+`safe-open` или состояния без удерживающей opposite pair. Во время каждого
+transition как минимум одна pair rails непрерывно удерживает cube.
+
+Первое verified direct edge реализовано в runtime: `ScanHold(F) → ScanHold(U)`.
+После `scan-pose front` команда `scan-next up` переводит удерживающие
+left/right grippers в `frame_perpendicular` (whole-cube turn `F → U`), затем
+закрывает top/bottom pair в parallel configuration и только после этого
+открывает left/right rails. На всём transition cube удерживается хотя бы одной
+pair. Остальные edges добавляются только после такого же явного описания и
+hardware validation.
