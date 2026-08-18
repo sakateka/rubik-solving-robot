@@ -1,0 +1,14 @@
+[package]
+name = "rubik-link-protocol"
+version = "0.1.0"
+edition = "2021"
+description = "Transport-neutral protocol and UART framing for the Rubik robot"
+license = "MIT"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+
+[dependencies]

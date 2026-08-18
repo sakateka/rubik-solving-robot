@@ -2246,3 +2246,26 @@ espflash flash --monitor --chip esp32c6 --port /dev/ttyACM0 target/riscv32imac-u
 готовом стенде USB не нужен: C6 будет говорить с Duo по UART и с mobile app
 по BLE. Следующий шаг на C6 — заменить bridge небольшим framed protocol для
 `status`, `scan`, `solve`, `execute` и emergency `abort`.
+
+#### Robot control protocol and mobile architecture
+
+Архитектура управления зафиксирована в `docs/ROBOT_CONTROL_PROTOCOL.md`.
+Milk-V Duo остаётся единственным источником истины о commanded state стенда,
+scan data, solver sequence и mechanical action queue. ESP32-C6 — BLE ↔ UART
+gateway с приоритетной доставкой `Abort`; mobile application отображает state
+и отправляет только semantic commands.
+
+Production controller будет долгоживущим Duo daemon с event loop. Длинные
+операции нельзя выполнять одним blocking вызовом: scan и execute разбиваются
+на bounded mechanical actions и ожидания по deadline, чтобы между шагами
+обслуживать `GetStatus`, events и немедленный `Abort`. При abort все PWM outputs
+выключаются, очередь отменяется, а двигавшиеся axes становятся `Unknown`, так
+как позиционной обратной связи у servo нет.
+
+Общий transport-neutral packet имеет explicit version, message kind, opcode,
+request ID, payload length, payload и CRC-16/CCITT-FALSE. UART использует
+`COBS(packet) + 0x00`: Consistent Overhead Byte Stuffing удаляет нули из
+encoded frame, поэтому нулевой байт является однозначным delimiter и позволяет
+receiver восстановить синхронизацию после повреждённого пакета. Начальная
+реализация framing находится в shared `no_std` crate
+`crates/rubik-link-protocol`; он предназначен для Duo, C6 и Android client.

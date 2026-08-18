@@ -1,3 +1,8 @@
+[workspace]
+members = ["crates/rubik-link-protocol"]
+exclude = ["firmware/esp32c6-controller", "duo-buildroot-sdk-v2"]
+resolver = "2"
+
 [package]
 name = "rubik-scan"
 version = "0.1.0"
