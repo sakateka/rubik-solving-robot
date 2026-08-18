@@ -2225,3 +2225,24 @@ perpendicular без движения cube и rail снова закрывает
 Любое штатное открытие rails выполняется только в двух фазах: сначала
 left/right, затем top/bottom. Пока первая pair открывается, противоположная
 pair удерживает cube. Одновременное открытие всех четырёх rails не допускается.
+
+#### ESP32-C6 Rust UART bridge
+
+Для radio/controller выбран Seeed XIAO ESP32-C6. Физический UART link с Duo
+подтверждён в обоих направлениях: `Duo GP0 (UART1_TX) → C6 D7 (RX/GPIO17)`,
+`Duo GP1 (UART1_RX) ← C6 D6 (TX/GPIO16)`, общий `GND`. На Duo используется
+`/dev/ttyS1` на 115200 baud.
+
+C6 firmware собирается на отдельном development host как Rust `no_std` crate
+`esp32c6-controller` с `esp-hal`; встроенный USB Serial/JTAG нужен только для
+flash и development monitor. Подтверждённая команда прошивки и monitor:
+
+```sh
+espflash flash --monitor --chip esp32c6 --port /dev/ttyACM0 target/riscv32imac-unknown-none-elf/debug/esp32c6-controller
+```
+
+Первый firmware milestone — прозрачный USB Serial/JTAG ↔ UART bridge —
+работает: через USB monitor C6 можно двусторонне общаться с Milk-V Duo. В
+готовом стенде USB не нужен: C6 будет говорить с Duo по UART и с mobile app
+по BLE. Следующий шаг на C6 — заменить bridge небольшим framed protocol для
+`status`, `scan`, `solve`, `execute` и emergency `abort`.
