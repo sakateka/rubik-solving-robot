@@ -2,14 +2,12 @@
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
-use rubik_link_protocol as link;
 use rubik_scan::{
     pca9685::Pca9685,
-    robot_link::UartStreamDecoder,
-    robot_service::{EventMessage, ResponsePayload, RobotService, ServiceMessage},
+    robot_link::{UartFrameEncoder, UartStreamDecoder},
+    robot_service::{RobotService, ServiceMessage},
     stand::StandCalibration,
 };
-use serde::Serialize;
 use std::{
     fs::{File, OpenOptions},
     io::{Read, Write},
@@ -84,7 +82,7 @@ fn main() -> Result<()> {
     let mut writer = uart;
     let receiver = spawn_uart_reader(reader);
     let mut decoder = UartStreamDecoder::default();
-    let mut encoder = MessageEncoder::default();
+    let mut encoder = UartFrameEncoder::default();
 
     let running = Arc::new(AtomicBool::new(true));
     let signal_running = Arc::clone(&running);
@@ -124,7 +122,7 @@ fn run_event_loop<D>(
     running: &AtomicBool,
     receiver: &mpsc::Receiver<std::io::Result<Vec<u8>>>,
     decoder: &mut UartStreamDecoder,
-    encoder: &mut MessageEncoder,
+    encoder: &mut UartFrameEncoder,
     writer: &mut File,
     service: &mut RobotService<D>,
 ) -> Result<()>
@@ -195,110 +193,13 @@ fn spawn_uart_reader(mut reader: File) -> mpsc::Receiver<std::io::Result<Vec<u8>
     receiver
 }
 
-struct MessageEncoder {
-    payload: [u8; link::MAX_PAYLOAD_LEN],
-    packet: [u8; link::MAX_PACKET_LEN],
-    frame: [u8; link::MAX_UART_FRAME_LEN],
-}
-
-impl Default for MessageEncoder {
-    fn default() -> Self {
-        Self {
-            payload: [0; link::MAX_PAYLOAD_LEN],
-            packet: [0; link::MAX_PACKET_LEN],
-            frame: [0; link::MAX_UART_FRAME_LEN],
-        }
-    }
-}
-
-impl MessageEncoder {
-    fn encode<T: Serialize + ?Sized>(
-        &mut self,
-        kind: link::MessageKind,
-        opcode: u16,
-        request_id: u32,
-        payload: &T,
-    ) -> Result<&[u8]> {
-        let payload = link::encode_payload(payload, &mut self.payload)
-            .map_err(|error| anyhow::anyhow!("failed to encode protocol payload: {error}"))?;
-        let packet = link::Packet {
-            kind,
-            opcode,
-            request_id,
-            payload,
-        };
-        let length = link::frame_uart(packet, &mut self.packet, &mut self.frame)
-            .map_err(|error| anyhow::anyhow!("failed to frame protocol message: {error}"))?;
-        Ok(&self.frame[..length])
-    }
-}
-
 fn write_messages(
     writer: &mut File,
-    encoder: &mut MessageEncoder,
+    encoder: &mut UartFrameEncoder,
     messages: &[ServiceMessage],
 ) -> Result<()> {
     for message in messages {
-        let frame = match message {
-            ServiceMessage::Response(response) => match &response.payload {
-                ResponsePayload::Accepted(payload) => encoder.encode(
-                    link::MessageKind::Response,
-                    response.opcode.into(),
-                    response.request_id,
-                    payload,
-                )?,
-                ResponsePayload::Rejected(payload) => encoder.encode(
-                    link::MessageKind::Response,
-                    response.opcode.into(),
-                    response.request_id,
-                    payload,
-                )?,
-                ResponsePayload::Status(payload) => encoder.encode(
-                    link::MessageKind::Response,
-                    response.opcode.into(),
-                    response.request_id,
-                    payload.as_ref(),
-                )?,
-            },
-            ServiceMessage::Event(event) => match event {
-                EventMessage::RobotStateChanged(payload) => encoder.encode(
-                    link::MessageKind::Event,
-                    link::EventOpcode::RobotStateChanged.into(),
-                    0,
-                    payload,
-                )?,
-                EventMessage::StandStateChanged(payload) => encoder.encode(
-                    link::MessageKind::Event,
-                    link::EventOpcode::StandStateChanged.into(),
-                    0,
-                    payload,
-                )?,
-                EventMessage::CubeSessionChanged(payload) => encoder.encode(
-                    link::MessageKind::Event,
-                    link::EventOpcode::CubeSessionChanged.into(),
-                    0,
-                    payload,
-                )?,
-                EventMessage::OperationCompleted(payload) => encoder.encode(
-                    link::MessageKind::Event,
-                    link::EventOpcode::OperationCompleted.into(),
-                    0,
-                    payload,
-                )?,
-                EventMessage::Aborted(payload) => encoder.encode(
-                    link::MessageKind::Event,
-                    link::EventOpcode::Aborted.into(),
-                    0,
-                    payload,
-                )?,
-                EventMessage::Fault(payload) => encoder.encode(
-                    link::MessageKind::Event,
-                    link::EventOpcode::Fault.into(),
-                    0,
-                    payload,
-                )?,
-            },
-        };
+        let frame = message.encode_uart(encoder)?;
         writer
             .write_all(frame)
             .context("failed to write UART frame")?;

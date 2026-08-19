@@ -2339,3 +2339,44 @@ bash scripts/build-duo.sh
 При любом штатном завершении event loop и при его ошибке daemon делает
 best-effort `all_off`; после startup первый допустимый motion command —
 `RecoverToOpen`.
+
+#### Host-side protocol client
+
+Добавлен transport-independent `RobotClient`. Он не открывает UART сам и не
+знает о PCA9685: распределяет request IDs, кодирует commands в UART frames,
+инкрементально декодирует responses/events и поддерживает локальную копию
+последнего authoritative status. Один и тот же client state machine можно
+позже поместить за serial transport, BLE transport или Android UI.
+
+UART encoder вынесен из `rubik-robotd` в общий `robot_link`, поэтому daemon и
+client используют одну реализацию `postcard → packet → CRC → COBS`. Тест
+`status_and_recovery_round_trip_as_real_uart_frames` соединяет `RobotClient` и
+`RobotService` через in-memory byte stream. PCA в нём заменена `MockOutput`:
+тест прогоняет `GetStatus`, принимает `RecoverToOpen`, переводит service через
+все deadline phases и проверяет итоговый `Open`, не обращаясь к I²C и servo.
+
+Для ручной диагностики с development host добавлен `rubik-robotctl`. По
+умолчанию он открывает C6 USB Serial/JTAG bridge как `/dev/ttyACM0` и ждёт
+ответ/завершение операции до 10 секунд:
+
+```sh
+cargo build --bin rubik-robotctl
+./target/debug/rubik-robotctl status
+./target/debug/rubik-robotctl abort
+./target/debug/rubik-robotctl --confirm-stand-motion recover
+./target/debug/rubik-robotctl --confirm-stand-motion grip
+```
+
+`status` ничего не двигает. `recover` и `grip` требуют явный
+`--confirm-stand-motion`; `abort` не требует подтверждения, чтобы software stop
+не зависел от дополнительного флага. CLI печатает controller/stand/session,
+состояние всех rails и grippers, scan/solution progress и приходящие events.
+До первого response CLI повторяет тот же frame с тем же request ID каждые
+500 ms. Это не дублирует operation благодаря daemon request cache и позволяет
+пережить потерянный пакет или startup-текст development bridge перед первым
+COBS delimiter.
+
+Каждый отдельный процесс `rubik-robotctl` начинает request IDs со значения,
+полученного из времени запуска и PID. Начинать всегда с `1` нельзя: daemon
+помнит последние 16 responses и должен отвергать случай, когда один ID сначала
+использован для `GetStatus`, а затем для другого opcode, например `Abort`.

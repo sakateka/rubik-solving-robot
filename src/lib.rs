@@ -12,6 +12,7 @@ pub mod model;
 pub mod pca9685;
 pub mod postprocess;
 pub mod preprocess;
+pub mod robot_client;
 pub mod robot_link;
 #[cfg(feature = "pca9685")]
 pub mod robot_service;

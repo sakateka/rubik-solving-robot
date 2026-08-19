@@ -1,9 +1,87 @@
 //! Allocation-free packet framing at a byte-stream boundary.
 
 use rubik_link_protocol::{
-    parse_uart_frame, MessageKind, WireError, MAX_PACKET_LEN, MAX_PAYLOAD_LEN, MAX_UART_FRAME_LEN,
-    UART_DELIMITER,
+    encode_payload, frame_uart, parse_uart_frame, MessageKind, Packet, PayloadError, WireError,
+    MAX_PACKET_LEN, MAX_PAYLOAD_LEN, MAX_UART_FRAME_LEN, UART_DELIMITER,
 };
+use serde::Serialize;
+use std::{error::Error, fmt};
+
+#[derive(Debug)]
+pub enum FrameEncodeError {
+    Payload(PayloadError),
+    Wire(WireError),
+}
+
+impl fmt::Display for FrameEncodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Payload(error) => write!(f, "failed to encode payload: {error}"),
+            Self::Wire(error) => write!(f, "failed to frame packet: {error:?}"),
+        }
+    }
+}
+
+impl Error for FrameEncodeError {}
+
+/// Reusable allocation-free encoder for either end of the UART link.
+pub struct UartFrameEncoder {
+    payload: [u8; MAX_PAYLOAD_LEN],
+    packet: [u8; MAX_PACKET_LEN],
+    frame: [u8; MAX_UART_FRAME_LEN],
+}
+
+impl Default for UartFrameEncoder {
+    fn default() -> Self {
+        Self {
+            payload: [0; MAX_PAYLOAD_LEN],
+            packet: [0; MAX_PACKET_LEN],
+            frame: [0; MAX_UART_FRAME_LEN],
+        }
+    }
+}
+
+impl UartFrameEncoder {
+    pub fn encode<T: Serialize + ?Sized>(
+        &mut self,
+        kind: MessageKind,
+        opcode: u16,
+        request_id: u32,
+        payload: &T,
+    ) -> Result<&[u8], FrameEncodeError> {
+        let payload_len = encode_payload(payload, &mut self.payload)
+            .map_err(FrameEncodeError::Payload)?
+            .len();
+        self.encode_raw(kind, opcode, request_id, payload_len)
+    }
+
+    pub fn encode_empty(
+        &mut self,
+        kind: MessageKind,
+        opcode: u16,
+        request_id: u32,
+    ) -> Result<&[u8], FrameEncodeError> {
+        self.encode_raw(kind, opcode, request_id, 0)
+    }
+
+    fn encode_raw(
+        &mut self,
+        kind: MessageKind,
+        opcode: u16,
+        request_id: u32,
+        payload_len: usize,
+    ) -> Result<&[u8], FrameEncodeError> {
+        let packet = Packet {
+            kind,
+            opcode,
+            request_id,
+            payload: &self.payload[..payload_len],
+        };
+        let length = frame_uart(packet, &mut self.packet, &mut self.frame)
+            .map_err(FrameEncodeError::Wire)?;
+        Ok(&self.frame[..length])
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReceivedPacket {

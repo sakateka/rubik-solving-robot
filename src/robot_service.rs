@@ -1,12 +1,13 @@
 //! Deadline-driven robot control service for UART/BLE commands.
 //!
-//! The service owns the PWM device and never sleeps. Callers interleave
-//! [`RobotService::tick`] with transport processing, which keeps `Abort` and
-//! `GetStatus` responsive while servo movement deadlines are pending.
+//! The service owns the PWM device and never blocks the event loop with motion
+//! delays. Callers interleave [`RobotService::tick`] with transport processing,
+//! which keeps `Abort` and `GetStatus` responsive while servo movement
+//! deadlines are pending.
 
 use crate::{
     pca9685::PwmOutput,
-    robot_link::ReceivedPacket,
+    robot_link::{FrameEncodeError, ReceivedPacket, UartFrameEncoder},
     stand::{GripperOrientation, RailPosition, StandAxis, StandCalibration},
 };
 use rubik_link_protocol as link;
@@ -42,6 +43,74 @@ pub enum EventMessage {
 pub enum ServiceMessage {
     Response(ResponseMessage),
     Event(EventMessage),
+}
+
+impl ServiceMessage {
+    pub fn encode_uart<'a>(
+        &self,
+        encoder: &'a mut UartFrameEncoder,
+    ) -> Result<&'a [u8], FrameEncodeError> {
+        match self {
+            Self::Response(response) => match &response.payload {
+                ResponsePayload::Accepted(payload) => encoder.encode(
+                    link::MessageKind::Response,
+                    response.opcode.into(),
+                    response.request_id,
+                    payload,
+                ),
+                ResponsePayload::Rejected(payload) => encoder.encode(
+                    link::MessageKind::Response,
+                    response.opcode.into(),
+                    response.request_id,
+                    payload,
+                ),
+                ResponsePayload::Status(payload) => encoder.encode(
+                    link::MessageKind::Response,
+                    response.opcode.into(),
+                    response.request_id,
+                    payload.as_ref(),
+                ),
+            },
+            Self::Event(event) => match event {
+                EventMessage::RobotStateChanged(payload) => encoder.encode(
+                    link::MessageKind::Event,
+                    link::EventOpcode::RobotStateChanged.into(),
+                    0,
+                    payload,
+                ),
+                EventMessage::StandStateChanged(payload) => encoder.encode(
+                    link::MessageKind::Event,
+                    link::EventOpcode::StandStateChanged.into(),
+                    0,
+                    payload,
+                ),
+                EventMessage::CubeSessionChanged(payload) => encoder.encode(
+                    link::MessageKind::Event,
+                    link::EventOpcode::CubeSessionChanged.into(),
+                    0,
+                    payload,
+                ),
+                EventMessage::OperationCompleted(payload) => encoder.encode(
+                    link::MessageKind::Event,
+                    link::EventOpcode::OperationCompleted.into(),
+                    0,
+                    payload,
+                ),
+                EventMessage::Aborted(payload) => encoder.encode(
+                    link::MessageKind::Event,
+                    link::EventOpcode::Aborted.into(),
+                    0,
+                    payload,
+                ),
+                EventMessage::Fault(payload) => encoder.encode(
+                    link::MessageKind::Event,
+                    link::EventOpcode::Fault.into(),
+                    0,
+                    payload,
+                ),
+            },
+        }
+    }
 }
 
 #[derive(Clone)]
