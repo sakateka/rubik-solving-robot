@@ -1,9 +1,7 @@
 # Robot control architecture and link protocol
 
-This document defines communication between the Android application, the
-ESP32-C6 radio controller, and the Milk-V Duo robot controller. It describes
-the intended production architecture; the current C6 USB-to-UART bridge is a
-bring-up tool, not the final application protocol.
+This document defines communication between the browser UI, the ESP32-C6
+network controller, and the Milk-V Duo robot controller.
 
 The behavioural command sequences and cube-session rules are specified in
 `ROBOT_OPERATION_WORKFLOWS.md`.
@@ -11,11 +9,11 @@ The behavioural command sequences and cube-session rules are specified in
 ## Responsibility boundaries
 
 ```text
-Android application
-        │ BLE GATT
+Browser
+        │ HTTP + WebSocket over Wi-Fi
         ▼
 ESP32-C6
-  BLE ↔ UART gateway
+  WPA2 access point, web server and protocol gateway
         │ UART1, 115200 baud
         ▼
 Milk-V Duo
@@ -29,13 +27,13 @@ Milk-V Duo
 The Milk-V Duo is the single source of truth. It owns the commanded mechanical
 state, cube scan, solver input and output, and the mechanical action queue.
 
-The ESP32-C6 owns BLE connectivity, UART framing and forwarding, and link
-status. It does not decide how to move the cube. `Abort` is the only command
-that receives transport priority: C6 places it ahead of queued traffic and
-retries it until Duo acknowledges it.
+The ESP32-C6 owns Wi-Fi connectivity, embedded HTML/CSS/JavaScript assets, the
+HTTP/WebSocket API, UART framing and link status. It does not decide how to
+move the cube. `Abort` is the only command that receives transport priority:
+C6 places it ahead of queued traffic and retries it until Duo acknowledges it.
 
-The Android application presents the state and sends semantic commands. It
-must never send PCA9685 channel values or servo pulse widths.
+The browser presents state and sends semantic commands. It must never send
+PCA9685 channel values or servo pulse widths.
 
 ## Duo robot daemon
 
@@ -168,12 +166,12 @@ Incremental events avoid repeatedly transmitting the entire snapshot:
 view even if notifications were lost.
 
 Sticker confidence is transmitted as an integer from 0 to 255. This is enough
-for the mobile UI to mark uncertain recognition without exposing model-specific
+for the web UI to mark uncertain recognition without exposing model-specific
 floating-point details.
 
 Mechanical actions are semantic, for example `SetRail`, `SetGripper`, `Wait`,
 `CaptureFace`, and `RecognizeFace`. Raw PWM values are diagnostic information
-and are not part of the normal mobile API.
+and are not part of the normal HTTP API.
 
 ## Transport-neutral packet
 
@@ -208,9 +206,10 @@ The solution buffer is bounded at 32 logical moves and the status snapshot
 contains at most 16 preview actions. Count fields are validated after
 deserialization; CRC-valid input is not automatically schema-valid.
 
-Request IDs are allocated by the phone. Duo keeps a bounded cache of recent
-request results. Receiving the same ID again returns the previous result and
-must not start a second scan or execute a move twice.
+Request IDs are allocated by the upstream adapter: C6 for HTTP requests and
+`rubik-robotctl` for development USB requests. Duo keeps a bounded cache of
+recent request results. Receiving the same ID again returns the previous
+result and must not start a second scan or execute a move twice.
 
 ## UART framing: COBS
 
@@ -230,21 +229,42 @@ timing gaps.
 The CRC detects corruption of an otherwise structurally valid frame. COBS
 provides framing and resynchronization; it does not provide integrity.
 
-## BLE transport
+## Wi-Fi and HTTP transport
 
-C6 exposes one custom GATT service with at least two characteristics:
+C6 starts a WPA2-protected access point and serves the UI directly. The first
+deployment uses a static gateway address and DHCP, so the robot remains
+reachable without a home network or Internet connection:
 
-- command: phone writes packets to C6;
-- event: C6 sends notifications to the phone.
+```text
+SSID: configured at build time
+URL:  http://192.168.4.1/
+```
 
-The transport-neutral packet is reused, but COBS and the terminating zero are
-UART-specific. BLE messages larger than the negotiated ATT payload require a
-small fragmentation envelope containing packet ID, fragment index, and
-fragment count.
+HTTP maps semantic operations onto the same transport-neutral requests used by
+the USB development client. A WebSocket carries state and progress events to
+the browser. The initial API surface is:
 
-Business payloads pass through C6 unchanged. C6 only needs to understand the
-wire envelope sufficiently to prioritize `Abort`, correlate delivery, and
-report UART/BLE link status.
+| Method | Path | Meaning |
+|---|---|---|
+| `GET` | `/api/status` | Complete current snapshot. |
+| `POST` | `/api/recover` | Recover to a known open stand. |
+| `POST` | `/api/grip` | Grip a cube. |
+| `POST` | `/api/scan` | Scan all faces. |
+| `POST` | `/api/solve` | Solve the validated facelet. |
+| `POST` | `/api/execute` | Execute the prepared solution. |
+| `POST` | `/api/scan-solve-execute` | Run the complete flow. |
+| `POST` | `/api/open` | Release the cube preserving orientation. |
+| `POST` | `/api/abort` | Priority software stop. |
+| `GET` | `/api/events` | WebSocket event stream. |
+
+The firmware configuration is a compile-time overlay. A committed default
+contains non-secret bring-up values; an ignored `config/local.toml` overrides
+the SSID, WPA2 password, channel, address, or port for a particular robot.
+Configuration validation rejects invalid WPA2 password lengths and network
+values during the build.
+
+USB Serial/JTAG remains a binary development transport. It does not share text
+logs with protocol frames.
 
 ## Abort contract
 

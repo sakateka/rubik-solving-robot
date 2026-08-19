@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rubik Robot</title>
+  <style>
+    :root { color-scheme: dark; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #101214; color: #edf0f2; }
+    main { width: min(42rem, calc(100% - 2rem)); padding: 2rem; border: 1px solid #30363b; border-radius: 1rem; background: #171a1d; box-shadow: 0 1rem 4rem #0008; }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+    h1 { margin: 0; font-size: clamp(1.5rem, 5vw, 2.5rem); }
+    #status { padding: .4rem .65rem; border-radius: 999px; background: #25322b; color: #79e2a4; }
+    p { color: #aeb7bd; line-height: 1.6; }
+    code { color: #f2cb69; }
+  </style>
+</head>
+<body>
+  <main>
+    <header><h1>Rubik Robot</h1><span id="status">checking…</span></header>
+    <p>The ESP32-C6 Wi-Fi transport is running. Robot state and controls will appear here when the UART-backed API is connected.</p>
+    <p>Gateway: <code id="gateway"></code></p>
+  </main>
+  <script>
+    document.querySelector('#gateway').textContent = location.host;
+    fetch('/api/health')
+      .then(response => { if (!response.ok) throw new Error(response.status); return response.json(); })
+      .then(() => { document.querySelector('#status').textContent = 'online'; })
+      .catch(() => { document.querySelector('#status').textContent = 'offline'; });
+  </script>
+</body>
+</html>

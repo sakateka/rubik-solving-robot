@@ -9,7 +9,31 @@ name = "esp32c6-controller"
 path = "./src/bin/main.rs"
 
 [dependencies]
+edge-dhcp = "0.8.0"
+edge-nal = "0.7.0"
+edge-nal-embassy = "0.9.0"
+embassy-executor = "0.10.0"
+embassy-futures = "0.1"
+embassy-net = { version = "0.9.1", features = [
+  "dhcpv4",
+  "medium-ethernet",
+  "tcp",
+  "udp",
+] }
+embassy-time = "0.5.0"
+embedded-io-async = "0.7"
+esp-alloc = "0.10.0"
 esp-hal = { version = "~1.1.0", features = ["esp32c6", "log-04", "unstable"] }
+esp-radio = { version = "0.18.0", features = ["esp32c6", "log-04", "wifi"] }
+esp-rtos = { version = "0.3.0", features = [
+  "embassy",
+  "esp-alloc",
+  "esp-radio",
+  "esp32c6",
+  "log-04",
+] }
+log = "0.4.27"
+picoserve = { version = "0.18.0", features = ["embassy", "log"] }
 rubik-link-gateway = { path = "../../crates/rubik-link-gateway" }
 rubik-link-protocol = { path = "../../crates/rubik-link-protocol" }
 static_cell = "2.1"
@@ -37,8 +61,15 @@ esp-println = { version = "0.17.0", default-features = false, features = [
 # Always build with some optimizations enabled.
 opt-level = "s"
 
+[profile.dev.package.esp-radio]
+opt-level = 3
+
 [profile.release]
 codegen-units = 1     # LLVM can perform better optimizations using a single thread
 debug         = 2     # prefer slower builds but better debugging experience
 lto           = 'fat'
 opt-level     = 's'
+
+[build-dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"

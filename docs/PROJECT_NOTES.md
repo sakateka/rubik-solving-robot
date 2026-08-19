@@ -2423,17 +2423,50 @@ UART. На стороне simulator специальное подтвержде�
 держит bounded normal и priority queues, ставит `Abort` перед normal requests и
 повторяет его каждые 100 ms до response с тем же request ID. Повтор того же
 Abort ID не создаёт ещё одну запись в очереди. Ответы Duo можно извлекать как
-COBS frame для development USB или как transport-neutral packet для будущего
-BLE GATT.
+COBS frame для development USB или как transport-neutral packet для другого
+upstream transport.
 
 Gateway core подключён к `firmware/esp32c6-controller`: USB Serial/JTAG теперь
 принимает только protocol frames, UART1 сохраняет 115200 baud и прежние pins.
 Строка `rubik-c6 ready` удалена, поскольку текст и binary protocol не должны
-делить один stream. Большой fixed buffer pool размещён в static memory через
-safe `StaticCell::init_with`, а не на stack и не через mutable static/unsafe.
+делить один stream. Fixed gateway state не использует heap; в async firmware он
+хранится в static task storage `esp-rtos`, без mutable static и без unsafe кода.
 
 Проверки gateway core покрывают Abort ordering/retry/deduplication, queue limit,
 malformed-frame resynchronization и USB/BLE output forms. C6 firmware успешно
 прошёл `cargo check` для `riscv32imac-unknown-none-elf`. Команды сборки,
 прошивки и quiet smoke test находятся в
 `firmware/esp32c6-controller/README.md`.
+
+#### Wi-Fi access point and embedded HTTP UI
+
+От отдельного Android/BLE client отказались в пользу browser UI. Production
+граница теперь такая: Duo остаётся источником robot state и выполняет camera,
+solver и motion operations; ESP32-C6 поднимает WPA2 SoftAP, раздаёт web assets
+и адаптирует HTTP/WebSocket к существующему UART protocol. USB Serial/JTAG
+остаётся binary development transport для `rubik-robotctl`.
+
+В firmware добавлены `esp-radio` + Embassy network stack, DHCP server и
+`picoserve`. Первый vertical slice поднимает SSID `Rubik Robot`, выдаёт адреса
+клиентам, обслуживает `http://192.168.4.1/` и `GET /api/health`, одновременно
+сохраняя проверенный USB ↔ UART gateway.
+
+Wi-Fi и HTTP settings собираются из `config/default.toml` и необязательного
+игнорируемого `config/local.toml`. Default password `ChangeMe` предназначен
+только для bring-up; build script проверяет длину WPA2 password, SSID, channel,
+IPv4 address и port до компиляции firmware.
+
+Проверка выполнялась командами:
+
+```sh
+cd firmware/esp32c6-controller
+cargo check
+cargo clippy -- -D warnings
+cargo build --release
+espflash save-image --chip esp32c6 --merge --flash-size 4mb --skip-padding target/riscv32imac-unknown-none-elf/release/esp32c6-controller /tmp/esp32c6-controller.bin
+```
+
+Release application занимает 684896 из 4128768 bytes app partition (16.59%),
+поэтому для API, WebSocket и полноценного JS UI остаётся большой запас flash.
+Следующий transport milestone — связать `GET /api/status` с Duo через gateway,
+после чего добавить command endpoints и event WebSocket.
