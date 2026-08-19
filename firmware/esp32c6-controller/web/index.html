@@ -14,20 +14,42 @@
     #status { padding: .4rem .65rem; border-radius: 999px; background: #25322b; color: #79e2a4; }
     p { color: #aeb7bd; line-height: 1.6; }
     code { color: #f2cb69; }
+    pre { margin: 1.5rem 0 0; padding: 1rem; overflow: auto; border-radius: .65rem; background: #0d0f11; color: #c8d1d7; line-height: 1.45; }
+    #status.error { background: #3a2528; color: #ff9ca5; }
   </style>
 </head>
 <body>
   <main>
     <header><h1>Rubik Robot</h1><span id="status">checking…</span></header>
-    <p>The ESP32-C6 Wi-Fi transport is running. Robot state and controls will appear here when the UART-backed API is connected.</p>
+    <p>Live robot state received from the Milk-V Duo through the ESP32-C6 UART gateway.</p>
     <p>Gateway: <code id="gateway"></code></p>
+    <pre id="robot-state">Loading /api/status…</pre>
   </main>
   <script>
     document.querySelector('#gateway').textContent = location.host;
-    fetch('/api/health')
-      .then(response => { if (!response.ok) throw new Error(response.status); return response.json(); })
-      .then(() => { document.querySelector('#status').textContent = 'online'; })
-      .catch(() => { document.querySelector('#status').textContent = 'offline'; });
+    const status = document.querySelector('#status');
+    const state = document.querySelector('#robot-state');
+
+    async function refreshStatus() {
+      try {
+        const response = await fetch('/api/status', { cache: 'no-store' });
+        if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
+        state.textContent = JSON.stringify(await response.json(), null, 2);
+        status.textContent = 'online';
+        status.classList.remove('error');
+      } catch (error) {
+        state.textContent = `Status unavailable: ${error.message}`;
+        status.textContent = 'offline';
+        status.classList.add('error');
+      }
+    }
+
+    async function pollStatus() {
+      await refreshStatus();
+      setTimeout(pollStatus, 1000);
+    }
+
+    pollStatus();
   </script>
 </body>
 </html>

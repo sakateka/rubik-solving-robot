@@ -115,7 +115,7 @@ fn initial_request_id() -> u32 {
     let mut hasher = DefaultHasher::new();
     SystemTime::now().hash(&mut hasher);
     std::process::id().hash(&mut hasher);
-    (hasher.finish() as u32).max(1)
+    ((hasher.finish() as u32) & 0x7fff_ffff).max(1)
 }
 
 fn wait_for_result(

@@ -81,8 +81,20 @@ Connect to the configured SSID and open:
 http://192.168.4.1/
 ```
 
-The page calls `GET /api/health` and changes its badge to `online`. The default
-SSID is `Rubik Robot`; the default password is `ChangeMe`.
+The page polls `GET /api/status` and renders the complete JSON snapshot returned
+by the Duo daemon. The default SSID is `Rubik Robot`; the default password is
+`ChangeMe`.
+
+The same endpoint can be checked without the UI:
+
+```sh
+curl http://192.168.4.1/api/status
+```
+
+This is a real request across the complete path
+HTTP → C6 gateway → UART → Duo daemon. If Duo does not answer within three
+seconds, C6 returns HTTP `504 Gateway Timeout`. `GET /api/health` only verifies
+the C6 HTTP server and does not contact Duo.
 
 ## Quiet end-to-end check
 
@@ -100,6 +112,6 @@ request caching, deadlines and protocol events remain real.
 
 ## Next milestone
 
-Connect `GET /api/status` to the UART gateway, then add command endpoints and a
-WebSocket event stream. Robot decisions and state remain on the Duo; C6 only
-adapts HTTP/WebSocket messages to the existing link protocol.
+Add command endpoints and a WebSocket event stream. Robot decisions and state
+remain on the Duo; C6 only adapts HTTP/WebSocket messages to the existing link
+protocol.

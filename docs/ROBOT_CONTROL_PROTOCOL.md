@@ -206,10 +206,12 @@ The solution buffer is bounded at 32 logical moves and the status snapshot
 contains at most 16 preview actions. Count fields are validated after
 deserialization; CRC-valid input is not automatically schema-valid.
 
-Request IDs are allocated by the upstream adapter: C6 for HTTP requests and
-`rubik-robotctl` for development USB requests. Duo keeps a bounded cache of
-recent request results. Receiving the same ID again returns the previous
-result and must not start a second scan or execute a move twice.
+Request IDs are allocated by the upstream adapter. Development USB requests
+from `rubik-robotctl` use `0x00000001..0x7fffffff`; C6 HTTP requests use
+`0x80000000..0xffffffff`. The disjoint ranges let both transports have requests
+in flight without an ID collision. Duo keeps a bounded cache of recent request
+results. Receiving the same ID again returns the previous result and must not
+start a second scan or execute a move twice.
 
 ## UART framing: COBS
 

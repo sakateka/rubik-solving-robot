@@ -2470,3 +2470,27 @@ Release application занимает 684896 из 4128768 bytes app partition (16
 поэтому для API, WebSocket и полноценного JS UI остаётся большой запас flash.
 Следующий transport milestone — связать `GET /api/status` с Duo через gateway,
 после чего добавить command endpoints и event WebSocket.
+
+#### HTTP status через Duo
+
+`GET /api/status` теперь проходит полный production path: HTTP handler на C6
+создаёт protocol `GetStatus`, gateway отправляет его по UART в Duo daemon и
+возвращает полученный `StatusSnapshot` как JSON. Это отличается от
+`GET /api/health`, который проверяет только HTTP server самого C6.
+
+USB и HTTP получили раздельные response queues. Gateway запоминает источник
+каждого `request_id`, поэтому одновременный `rubik-robotctl status` и browser
+poll не могут забрать ответы друг друга. HTTP request IDs выделяются из
+диапазона с установленным старшим битом. Deadline одного запроса — три секунды;
+при timeout route удаляется из bounded gateway table, чтобы отключённый Duo не
+мог со временем навсегда заполнить её.
+
+Проверка после запуска `rubik-robotd` или `rubik-robotd-sim` на Duo:
+
+```sh
+curl http://192.168.4.1/api/status
+```
+
+Встроенная страница опрашивает этот endpoint раз в секунду после завершения
+предыдущего запроса и показывает полный JSON snapshot. Следующий transport
+milestone — command HTTP endpoints и WebSocket для protocol events.

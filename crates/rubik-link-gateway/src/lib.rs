@@ -1,19 +1,28 @@
 #![no_std]
 
-//! Allocation-free routing core for the ESP32-C6 BLE/USB ↔ Duo UART gateway.
+//! Allocation-free routing core for the ESP32-C6 network/USB ↔ Duo UART gateway.
 
 use rubik_link_protocol as link;
 
 pub const NORMAL_QUEUE_CAPACITY: usize = 4;
 pub const URGENT_QUEUE_CAPACITY: usize = 2;
 pub const UPSTREAM_QUEUE_CAPACITY: usize = 4;
+pub const REQUEST_ROUTE_CAPACITY: usize = NORMAL_QUEUE_CAPACITY + URGENT_QUEUE_CAPACITY;
 pub const ABORT_RETRY_INTERVAL_MS: u64 = 100;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Upstream {
+    Usb,
+    Network,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum QueueKind {
     NormalToDuo,
     UrgentToDuo,
-    ToUpstream,
+    ToUsb,
+    ToNetwork,
+    RequestRoutes,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -24,6 +33,8 @@ pub enum GatewayError {
     UpstreamPacketMustBeRequest,
     UpstreamRequestIdMustBeNonZero,
     DuoPacketMustBeResponseOrEvent,
+    DuplicateRequestId(u32),
+    UnmatchedResponseRequestId(u32),
 }
 
 impl From<link::WireError> for GatewayError {
@@ -118,6 +129,20 @@ impl<const N: usize> PacketQueue<N> {
     fn contains_request_id(&self, request_id: u32) -> bool {
         (0..self.len).any(|offset| self.slots[(self.head + offset) % N].request_id() == request_id)
     }
+
+    fn remove_request_id(&mut self, request_id: u32) -> bool {
+        let original_len = self.len;
+        let mut removed = false;
+        for _ in 0..original_len {
+            let packet = self.pop().expect("queue length was captured");
+            if !removed && packet.request_id() == request_id {
+                removed = true;
+            } else {
+                self.push(packet).expect("removal preserves queue capacity");
+            }
+        }
+        removed
+    }
 }
 
 struct StreamDecoder {
@@ -180,14 +205,71 @@ struct PendingAbort {
     next_retry_ms: u64,
 }
 
+#[derive(Clone, Copy)]
+struct RequestRoute {
+    request_id: u32,
+    upstream: Upstream,
+}
+
+struct RequestRoutes {
+    slots: [Option<RequestRoute>; REQUEST_ROUTE_CAPACITY],
+}
+
+impl RequestRoutes {
+    const fn new() -> Self {
+        Self {
+            slots: [None; REQUEST_ROUTE_CAPACITY],
+        }
+    }
+
+    fn insert(&mut self, route: RequestRoute) -> Result<(), GatewayError> {
+        if self
+            .slots
+            .iter()
+            .flatten()
+            .any(|entry| entry.request_id == route.request_id)
+        {
+            return Err(GatewayError::DuplicateRequestId(route.request_id));
+        }
+        let slot = self
+            .slots
+            .iter_mut()
+            .find(|entry| entry.is_none())
+            .ok_or(GatewayError::QueueFull(QueueKind::RequestRoutes))?;
+        *slot = Some(route);
+        Ok(())
+    }
+
+    fn remove(&mut self, request_id: u32) -> Option<Upstream> {
+        let slot = self
+            .slots
+            .iter_mut()
+            .find(|entry| entry.is_some_and(|route| route.request_id == request_id))?;
+        slot.take().map(|route| route.upstream)
+    }
+
+    fn remove_for(&mut self, request_id: u32, upstream: Upstream) -> bool {
+        let Some(slot) = self.slots.iter_mut().find(|entry| {
+            entry.is_some_and(|route| route.request_id == request_id && route.upstream == upstream)
+        }) else {
+            return false;
+        };
+        *slot = None;
+        true
+    }
+}
+
 /// Protocol-aware forwarding core. Hardware drivers feed bytes/packets into
-/// it and drain complete frames without exposing UART or BLE types here.
+/// it and drain complete frames without exposing UART, HTTP, or Wi-Fi types.
 pub struct Gateway {
     usb_decoder: StreamDecoder,
     duo_decoder: StreamDecoder,
     urgent_to_duo: PacketQueue<URGENT_QUEUE_CAPACITY>,
     normal_to_duo: PacketQueue<NORMAL_QUEUE_CAPACITY>,
-    to_upstream: PacketQueue<UPSTREAM_QUEUE_CAPACITY>,
+    to_usb: PacketQueue<UPSTREAM_QUEUE_CAPACITY>,
+    to_network: PacketQueue<UPSTREAM_QUEUE_CAPACITY>,
+    request_routes: RequestRoutes,
+    event_upstream: Option<Upstream>,
     pending_abort: Option<PendingAbort>,
     packet_scratch: [u8; link::MAX_PACKET_LEN],
 }
@@ -205,7 +287,10 @@ impl Gateway {
             duo_decoder: StreamDecoder::new(),
             urgent_to_duo: PacketQueue::new(),
             normal_to_duo: PacketQueue::new(),
-            to_upstream: PacketQueue::new(),
+            to_usb: PacketQueue::new(),
+            to_network: PacketQueue::new(),
+            request_routes: RequestRoutes::new(),
+            event_upstream: None,
             pending_abort: None,
             packet_scratch: [0; link::MAX_PACKET_LEN],
         }
@@ -217,12 +302,17 @@ impl Gateway {
             Ok(packet) => packet,
             Err(error) => return Some(Err(error)),
         };
-        Some(self.route_upstream_request(packet))
+        Some(self.route_upstream_request(packet, Upstream::Usb))
     }
 
-    /// Queues one transport-neutral packet received from BLE.
+    /// Queues one transport-neutral packet received from HTTP/WebSocket.
+    pub fn push_network_packet(&mut self, bytes: &[u8]) -> Result<RouteOutcome, GatewayError> {
+        self.route_upstream_request(FixedPacket::from_bytes(bytes)?, Upstream::Network)
+    }
+
+    /// Compatibility alias for an alternative packet-oriented radio transport.
     pub fn push_ble_packet(&mut self, bytes: &[u8]) -> Result<RouteOutcome, GatewayError> {
-        self.route_upstream_request(FixedPacket::from_bytes(bytes)?)
+        self.push_network_packet(bytes)
     }
 
     /// Feeds bytes returned by Duo. Complete responses/events are queued for
@@ -265,24 +355,52 @@ impl Gateway {
 
     /// Produces the next complete COBS frame for the development USB link.
     pub fn dequeue_usb_frame(&mut self, output: &mut [u8]) -> Result<Option<usize>, GatewayError> {
-        let Some(packet) = self.to_upstream.pop() else {
+        let Some(packet) = self.to_usb.pop() else {
             return Ok(None);
         };
         self.frame_packet(packet, output).map(Some)
     }
 
-    /// Produces the next transport-neutral packet for BLE. COBS is UART/USB
-    /// specific and is intentionally absent here.
-    pub fn dequeue_ble_packet(&mut self, output: &mut [u8]) -> Result<Option<usize>, GatewayError> {
-        let Some(packet) = self.to_upstream.peek() else {
+    /// Produces the next transport-neutral packet for HTTP/WebSocket. COBS is
+    /// UART/USB specific and is intentionally absent here.
+    pub fn dequeue_network_packet(
+        &mut self,
+        output: &mut [u8],
+    ) -> Result<Option<usize>, GatewayError> {
+        let Some(packet) = self.to_network.peek() else {
             return Ok(None);
         };
         if output.len() < packet.len {
             return Err(GatewayError::Wire(link::WireError::OutputTooSmall));
         }
-        let packet = self.to_upstream.pop().expect("queue was non-empty");
+        let packet = self.to_network.pop().expect("queue was non-empty");
         output[..packet.len].copy_from_slice(&packet.bytes[..packet.len]);
         Ok(Some(packet.len))
+    }
+
+    /// Compatibility alias for an alternative packet-oriented radio transport.
+    pub fn dequeue_ble_packet(&mut self, output: &mut [u8]) -> Result<Option<usize>, GatewayError> {
+        self.dequeue_network_packet(output)
+    }
+
+    /// Forgets a timed-out network request so disconnected Duo hardware cannot
+    /// permanently exhaust the bounded request-route table.
+    pub fn cancel_network_request(&mut self, request_id: u32) -> bool {
+        if !self
+            .request_routes
+            .remove_for(request_id, Upstream::Network)
+        {
+            return false;
+        }
+        self.normal_to_duo.remove_request_id(request_id);
+        self.urgent_to_duo.remove_request_id(request_id);
+        if self
+            .pending_abort
+            .is_some_and(|pending| pending.packet.request_id() == request_id)
+        {
+            self.pending_abort = None;
+        }
+        true
     }
 
     pub const fn abort_pending(&self) -> bool {
@@ -292,6 +410,7 @@ impl Gateway {
     fn route_upstream_request(
         &mut self,
         packet: FixedPacket,
+        upstream: Upstream,
     ) -> Result<RouteOutcome, GatewayError> {
         let decoded = packet.packet();
         if decoded.kind != link::MessageKind::Request {
@@ -308,32 +427,81 @@ impl Gateway {
             if duplicate_pending || self.urgent_to_duo.contains_request_id(decoded.request_id) {
                 return Ok(RouteOutcome::DuplicateAbortIgnored);
             }
-            self.urgent_to_duo
-                .push(packet)
-                .map_err(|()| GatewayError::QueueFull(QueueKind::UrgentToDuo))?;
+            self.request_routes.insert(RequestRoute {
+                request_id: decoded.request_id,
+                upstream,
+            })?;
+            self.urgent_to_duo.push(packet).map_err(|()| {
+                self.request_routes.remove(decoded.request_id);
+                GatewayError::QueueFull(QueueKind::UrgentToDuo)
+            })?;
         } else {
-            self.normal_to_duo
-                .push(packet)
-                .map_err(|()| GatewayError::QueueFull(QueueKind::NormalToDuo))?;
+            self.request_routes.insert(RequestRoute {
+                request_id: decoded.request_id,
+                upstream,
+            })?;
+            self.normal_to_duo.push(packet).map_err(|()| {
+                self.request_routes.remove(decoded.request_id);
+                GatewayError::QueueFull(QueueKind::NormalToDuo)
+            })?;
         }
         Ok(RouteOutcome::Queued)
     }
 
     fn route_duo_packet(&mut self, packet: FixedPacket) -> Result<(), GatewayError> {
         let decoded = packet.packet();
-        if decoded.kind == link::MessageKind::Request {
-            return Err(GatewayError::DuoPacketMustBeResponseOrEvent);
+        let kind = decoded.kind;
+        let opcode = decoded.opcode;
+        let request_id = decoded.request_id;
+        match kind {
+            link::MessageKind::Request => Err(GatewayError::DuoPacketMustBeResponseOrEvent),
+            link::MessageKind::Response => {
+                if self
+                    .pending_abort
+                    .is_some_and(|pending| pending.packet.request_id() == request_id)
+                {
+                    self.pending_abort = None;
+                }
+                let upstream = self
+                    .request_routes
+                    .remove(request_id)
+                    .ok_or(GatewayError::UnmatchedResponseRequestId(request_id))?;
+                if opcode == u16::from(link::ResponseOpcode::CommandAccepted) {
+                    self.event_upstream = Some(upstream);
+                }
+                self.queue_upstream(upstream, packet)
+            }
+            link::MessageKind::Event => {
+                let Some(upstream) = self.event_upstream else {
+                    return Ok(());
+                };
+                self.queue_upstream(upstream, packet)?;
+                if matches!(
+                    link::EventOpcode::try_from(opcode),
+                    Ok(link::EventOpcode::OperationCompleted
+                        | link::EventOpcode::Aborted
+                        | link::EventOpcode::OperationFailed
+                        | link::EventOpcode::Fault)
+                ) {
+                    self.event_upstream = None;
+                }
+                Ok(())
+            }
         }
-        if decoded.kind == link::MessageKind::Response
-            && self
-                .pending_abort
-                .is_some_and(|pending| pending.packet.request_id() == decoded.request_id)
-        {
-            self.pending_abort = None;
-        }
-        self.to_upstream
+    }
+
+    fn queue_upstream(
+        &mut self,
+        upstream: Upstream,
+        packet: FixedPacket,
+    ) -> Result<(), GatewayError> {
+        let (queue, kind) = match upstream {
+            Upstream::Usb => (&mut self.to_usb, QueueKind::ToUsb),
+            Upstream::Network => (&mut self.to_network, QueueKind::ToNetwork),
+        };
+        queue
             .push(packet)
-            .map_err(|()| GatewayError::QueueFull(QueueKind::ToUpstream))
+            .map_err(|()| GatewayError::QueueFull(kind))
     }
 
     fn frame_packet(
@@ -364,6 +532,18 @@ mod tests {
         let mut frame = [0; link::MAX_UART_FRAME_LEN];
         let len = link::frame_uart(packet, &mut scratch, &mut frame).unwrap();
         frame[..len].to_vec()
+    }
+
+    fn packet_bytes(kind: link::MessageKind, opcode: u16, request_id: u32) -> Vec<u8> {
+        let packet = link::Packet {
+            kind,
+            opcode,
+            request_id,
+            payload: &[],
+        };
+        let mut bytes = [0; link::MAX_PACKET_LEN];
+        let len = link::encode_packet(packet, &mut bytes).unwrap();
+        bytes[..len].to_vec()
     }
 
     fn push_usb(gateway: &mut Gateway, frame: &[u8]) -> RouteOutcome {
@@ -479,22 +659,108 @@ mod tests {
     }
 
     #[test]
-    fn duo_response_can_be_drained_as_usb_or_ble_packet() {
+    fn response_returns_only_to_the_requesting_upstream() {
         let response = uart_frame(link::MessageKind::Response, 0x1002, 45);
 
         let mut usb_gateway = Gateway::new();
+        push_usb(
+            &mut usb_gateway,
+            &uart_frame(link::MessageKind::Request, 1, 45),
+        );
+        dequeue_duo(&mut usb_gateway, 0);
         push_duo(&mut usb_gateway, &response);
         let mut usb = [0; link::MAX_UART_FRAME_LEN];
         let usb_len = usb_gateway.dequeue_usb_frame(&mut usb).unwrap().unwrap();
         assert_eq!(&usb[..usb_len], response.as_slice());
+        assert!(usb_gateway
+            .dequeue_network_packet(&mut [0; link::MAX_PACKET_LEN])
+            .unwrap()
+            .is_none());
 
-        let mut ble_gateway = Gateway::new();
-        push_duo(&mut ble_gateway, &response);
+        let mut network_gateway = Gateway::new();
+        network_gateway
+            .push_network_packet(&packet_bytes(link::MessageKind::Request, 1, 45))
+            .unwrap();
+        dequeue_duo(&mut network_gateway, 0);
+        push_duo(&mut network_gateway, &response);
         let mut raw = [0; link::MAX_PACKET_LEN];
-        let raw_len = ble_gateway.dequeue_ble_packet(&mut raw).unwrap().unwrap();
+        let raw_len = network_gateway
+            .dequeue_network_packet(&mut raw)
+            .unwrap()
+            .unwrap();
         let packet = link::decode_packet(&raw[..raw_len]).unwrap();
         assert_eq!(packet.request_id, 45);
         assert_eq!(packet.kind, link::MessageKind::Response);
+        assert!(network_gateway
+            .dequeue_usb_frame(&mut [0; link::MAX_UART_FRAME_LEN])
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn simultaneous_usb_and_network_responses_do_not_cross() {
+        let mut gateway = Gateway::new();
+        push_usb(
+            &mut gateway,
+            &uart_frame(link::MessageKind::Request, 1, 100),
+        );
+        gateway
+            .push_network_packet(&packet_bytes(link::MessageKind::Request, 1, 200))
+            .unwrap();
+        dequeue_duo(&mut gateway, 0);
+        dequeue_duo(&mut gateway, 0);
+
+        push_duo(
+            &mut gateway,
+            &uart_frame(link::MessageKind::Response, 0x1002, 200),
+        );
+        push_duo(
+            &mut gateway,
+            &uart_frame(link::MessageKind::Response, 0x1002, 100),
+        );
+
+        let mut raw = [0; link::MAX_PACKET_LEN];
+        let len = gateway.dequeue_network_packet(&mut raw).unwrap().unwrap();
+        assert_eq!(link::decode_packet(&raw[..len]).unwrap().request_id, 200);
+
+        let mut frame = [0; link::MAX_UART_FRAME_LEN];
+        let len = gateway.dequeue_usb_frame(&mut frame).unwrap().unwrap();
+        let mut decoded = [0; link::MAX_PACKET_LEN];
+        assert_eq!(
+            link::parse_uart_frame(&frame[..len], &mut decoded)
+                .unwrap()
+                .request_id,
+            100
+        );
+    }
+
+    #[test]
+    fn timed_out_network_request_releases_its_route_slot() {
+        let mut gateway = Gateway::new();
+        for request_id in 1..=REQUEST_ROUTE_CAPACITY as u32 {
+            gateway
+                .push_network_packet(&packet_bytes(link::MessageKind::Request, 1, request_id))
+                .unwrap();
+            dequeue_duo(&mut gateway, 0);
+        }
+
+        assert_eq!(
+            gateway.push_network_packet(&packet_bytes(link::MessageKind::Request, 1, 100)),
+            Err(GatewayError::QueueFull(QueueKind::RequestRoutes))
+        );
+        assert!(gateway.cancel_network_request(1));
+        assert_eq!(
+            gateway.push_network_packet(&packet_bytes(link::MessageKind::Request, 1, 100)),
+            Ok(RouteOutcome::Queued)
+        );
+
+        let late_response = uart_frame(link::MessageKind::Response, 0x1002, 1);
+        let result = late_response
+            .iter()
+            .filter_map(|&byte| gateway.push_duo_byte(byte))
+            .last()
+            .unwrap();
+        assert_eq!(result, Err(GatewayError::UnmatchedResponseRequestId(1)));
     }
 
     #[test]

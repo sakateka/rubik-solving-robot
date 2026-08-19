@@ -7,12 +7,16 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
-use core::net::Ipv4Addr;
+use core::{
+    net::Ipv4Addr,
+    sync::atomic::{AtomicU32, Ordering},
+};
 
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
 use embassy_net::{Ipv4Cidr, Runner, Stack, StackResources, StaticConfigV4};
-use embassy_time::{Duration, Timer};
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
+use embassy_time::{Duration, Timer, with_timeout};
 use esp_alloc as _;
 use esp_backtrace as _;
 use esp_hal::{
@@ -29,11 +33,11 @@ use esp_radio::wifi::{
     ap::AccessPointConfig,
 };
 use picoserve::{
-    response::File,
-    routing::{Router, get_service},
+    response::{File, Json, StatusCode},
+    routing::{Router, get, get_service},
 };
 use rubik_link_gateway::Gateway;
-use rubik_link_protocol::MAX_UART_FRAME_LEN;
+use rubik_link_protocol::{self as link, CRC_LEN, HEADER_LEN, MAX_PACKET_LEN, MAX_UART_FRAME_LEN};
 use static_cell::StaticCell;
 
 mod app_config {
@@ -41,6 +45,53 @@ mod app_config {
 }
 
 esp_bootloader_esp_idf::esp_app_desc!();
+
+const HTTP_RPC_TIMEOUT: Duration = Duration::from_secs(3);
+const HTTP_REQUEST_ID_START: u32 = 0x8000_0001;
+
+static NEXT_HTTP_REQUEST_ID: AtomicU32 = AtomicU32::new(HTTP_REQUEST_ID_START);
+static HTTP_REQUESTS: Channel<CriticalSectionRawMutex, RequestPacket, 1> = Channel::new();
+static HTTP_RESPONSES: Channel<CriticalSectionRawMutex, OwnedPacket, 1> = Channel::new();
+static HTTP_CANCELLATIONS: Channel<CriticalSectionRawMutex, u32, 1> = Channel::new();
+
+struct RequestPacket {
+    bytes: [u8; HEADER_LEN + CRC_LEN],
+    len: usize,
+}
+
+impl RequestPacket {
+    fn new(opcode: link::RequestOpcode, request_id: u32) -> Result<Self, link::WireError> {
+        let mut packet = Self {
+            bytes: [0; HEADER_LEN + CRC_LEN],
+            len: 0,
+        };
+        packet.len = link::encode_packet(
+            link::Packet {
+                kind: link::MessageKind::Request,
+                opcode: opcode.into(),
+                request_id,
+                payload: &[],
+            },
+            &mut packet.bytes,
+        )?;
+        Ok(packet)
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+}
+
+struct OwnedPacket {
+    bytes: [u8; MAX_PACKET_LEN],
+    len: usize,
+}
+
+impl OwnedPacket {
+    fn as_slice(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+}
 
 macro_rules! make_static {
     ($type:ty, $value:expr) => {{
@@ -126,8 +177,9 @@ async fn http_server(network: Stack<'static>) -> ! {
                 "application/json",
                 br#"{"status":"ok","service":"rubik-robot"}"#,
             )),
-        );
-    let server_config = picoserve::Config::const_default().keep_connection_alive();
+        )
+        .route("/api/status", get(api_status));
+    let server_config = picoserve::Config::const_default().close_connection_after_response();
     let mut tcp_rx_buffer = [0; 2048];
     let mut tcp_tx_buffer = [0; 4096];
     let mut http_buffer = [0; 2048];
@@ -142,6 +194,56 @@ async fn http_server(network: Stack<'static>) -> ! {
         )
         .await
         .into_never()
+}
+
+#[allow(
+    clippy::large_stack_frames,
+    reason = "the HTTP request future is stored in picoserve task state"
+)]
+async fn api_status() -> Result<Json<link::StatusSnapshot>, (StatusCode, &'static str)> {
+    let request_id = NEXT_HTTP_REQUEST_ID.fetch_add(1, Ordering::Relaxed) | 0x8000_0000;
+    let request = RequestPacket::new(link::RequestOpcode::GetStatus, request_id).map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to encode status request",
+        )
+    })?;
+
+    HTTP_REQUESTS.send(request).await;
+    let response = with_timeout(HTTP_RPC_TIMEOUT, async {
+        loop {
+            let response = HTTP_RESPONSES.receive().await;
+            let packet = link::decode_packet(response.as_slice()).map_err(|_| ())?;
+            if packet.request_id == request_id {
+                break Result::<OwnedPacket, ()>::Ok(response);
+            }
+        }
+    })
+    .await;
+    let response = match response {
+        Ok(Ok(response)) => response,
+        Ok(Err(())) => {
+            return Err((StatusCode::BAD_GATEWAY, "Duo returned an invalid packet"));
+        }
+        Err(_) => {
+            HTTP_CANCELLATIONS.send(request_id).await;
+            return Err((StatusCode::GATEWAY_TIMEOUT, "Duo did not answer in time"));
+        }
+    };
+
+    let packet = link::decode_packet(response.as_slice())
+        .map_err(|_| (StatusCode::BAD_GATEWAY, "Duo returned an invalid packet"))?;
+    if packet.kind != link::MessageKind::Response
+        || packet.opcode != u16::from(link::ResponseOpcode::StatusSnapshot)
+    {
+        return Err((StatusCode::BAD_GATEWAY, "unexpected response from Duo"));
+    }
+    let snapshot: link::StatusSnapshot = link::decode_payload(packet.payload)
+        .map_err(|_| (StatusCode::BAD_GATEWAY, "invalid status payload from Duo"))?;
+    snapshot
+        .validate()
+        .map_err(|_| (StatusCode::BAD_GATEWAY, "invalid robot status from Duo"))?;
+    Ok(Json(snapshot))
 }
 
 #[allow(
@@ -179,6 +281,13 @@ async fn gateway_loop(
             let _ = gateway.push_usb_byte(byte);
         }
 
+        while let Ok(request_id) = HTTP_CANCELLATIONS.try_receive() {
+            gateway.cancel_network_request(request_id);
+        }
+        while let Ok(packet) = HTTP_REQUESTS.try_receive() {
+            let _ = gateway.push_network_packet(packet.as_slice());
+        }
+
         let now_ms = esp_hal::time::Instant::now()
             .duration_since_epoch()
             .as_millis();
@@ -199,6 +308,18 @@ async fn gateway_loop(
             if usb.write(&frame_buffer[..frame_len]).is_err() || usb.flush_tx().is_err() {
                 break;
             }
+        }
+
+        while !HTTP_RESPONSES.is_full() {
+            let Ok(Some(packet_len)) = gateway.dequeue_network_packet(&mut frame_buffer) else {
+                break;
+            };
+            let mut packet = OwnedPacket {
+                bytes: [0; MAX_PACKET_LEN],
+                len: packet_len,
+            };
+            packet.bytes[..packet_len].copy_from_slice(&frame_buffer[..packet_len]);
+            let _ = HTTP_RESPONSES.try_send(packet);
         }
 
         Timer::after_millis(1).await;
