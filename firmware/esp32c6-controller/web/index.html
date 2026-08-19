@@ -5,56 +5,161 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Rubik Robot</title>
   <style>
-    :root { color-scheme: dark; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    :root {
+      color-scheme: dark;
+      font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+      --bg: #0d1114;
+      --panel: #151b1f;
+      --panel-2: #1b2328;
+      --line: #303a40;
+      --muted: #94a1a9;
+      --text: #eef2f4;
+      --ok: #72dfa3;
+      --warn: #f2cb69;
+      --danger: #ff8f9a;
+    }
     * { box-sizing: border-box; }
-    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #101214; color: #edf0f2; }
-    main { width: min(42rem, calc(100% - 2rem)); padding: 2rem; border: 1px solid #30363b; border-radius: 1rem; background: #171a1d; box-shadow: 0 1rem 4rem #0008; }
-    header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
-    h1 { margin: 0; font-size: clamp(1.5rem, 5vw, 2.5rem); }
-    #status { padding: .4rem .65rem; border-radius: 999px; background: #25322b; color: #79e2a4; }
-    p { color: #aeb7bd; line-height: 1.6; }
-    code { color: #f2cb69; }
-    pre { margin: 1.5rem 0 0; padding: 1rem; overflow: auto; border-radius: .65rem; background: #0d0f11; color: #c8d1d7; line-height: 1.45; }
-    #status.error { background: #3a2528; color: #ff9ca5; }
-    section { margin-top: 1.5rem; padding-top: 1.5rem; border-top: 1px solid #30363b; }
-    h2 { margin: 0 0 1rem; font-size: 1rem; color: #c8d1d7; }
-    .button-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .65rem; }
-    button { min-height: 2.5rem; padding: .55rem .7rem; border: 1px solid #46515a; border-radius: .5rem; background: #222a30; color: #edf0f2; font: inherit; cursor: pointer; }
+    body { margin: 0; min-height: 100vh; background: radial-gradient(circle at 50% 0, #172127 0, var(--bg) 35rem); color: var(--text); }
+    main { width: min(72rem, calc(100% - 1.5rem)); margin: 0 auto; padding: 1.5rem 0 3rem; }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .5rem 0 1.25rem; }
+    h1 { margin: 0; font-size: clamp(1.65rem, 5vw, 2.5rem); letter-spacing: -.04em; }
+    h2 { margin: 0 0 1rem; font-size: .8rem; color: var(--muted); letter-spacing: .12em; text-transform: uppercase; }
+    h3 { margin: 0; font-size: .85rem; color: var(--muted); font-weight: 600; }
+    p { color: var(--muted); line-height: 1.55; }
+    code, pre, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .eyebrow { margin: 0 0 .2rem; color: var(--muted); font-size: .75rem; letter-spacing: .13em; text-transform: uppercase; }
+    .connection { padding: .45rem .75rem; border-radius: 999px; background: #203128; color: var(--ok); font: 600 .8rem ui-monospace, monospace; }
+    .connection.error { background: #3a2528; color: var(--danger); }
+    .panel { margin-top: 1rem; padding: 1.15rem; border: 1px solid var(--line); border-radius: .9rem; background: color-mix(in srgb, var(--panel) 94%, transparent); box-shadow: 0 .8rem 3rem #0003; }
+    .overview { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .8rem; }
+    .card { min-width: 0; padding: 1rem; border: 1px solid var(--line); border-radius: .75rem; background: var(--panel-2); }
+    .metric { margin-top: .4rem; font-size: 1.1rem; font-weight: 700; overflow-wrap: anywhere; }
+    .submetric { margin-top: .35rem; color: var(--muted); font-size: .8rem; }
+    .progress { height: .4rem; margin-top: .75rem; overflow: hidden; border-radius: 999px; background: #0c1012; }
+    .progress > span { display: block; width: 0; height: 100%; background: var(--ok); transition: width .15s ease; }
+    .section-grid { display: grid; grid-template-columns: minmax(18rem, .85fr) minmax(20rem, 1.15fr); gap: 1rem; }
+    table { width: 100%; border-collapse: collapse; font-size: .85rem; }
+    th, td { padding: .55rem .45rem; border-bottom: 1px solid #293239; text-align: left; }
+    th { color: var(--muted); font-size: .72rem; letter-spacing: .08em; text-transform: uppercase; }
+    tr:last-child td { border-bottom: 0; }
+    .state-pill { display: inline-block; padding: .18rem .4rem; border-radius: .3rem; background: #222c32; font: .75rem ui-monospace, monospace; }
+    .face-area { display: grid; grid-template-columns: minmax(0, 1fr) 5.5rem; gap: 1rem; align-items: start; }
+    .cube-net { display: grid; grid-template: ". u . ." auto "l f r b" auto ". d . ." auto / repeat(4, minmax(3.6rem, 1fr)); gap: .55rem; }
+    .face { min-width: 0; padding: .35rem; border: 1px solid var(--line); border-radius: .45rem; background: #0e1316; }
+    .face[data-face="U"] { grid-area: u; }
+    .face[data-face="R"] { grid-area: r; }
+    .face[data-face="F"] { grid-area: f; }
+    .face[data-face="D"] { grid-area: d; }
+    .face[data-face="L"] { grid-area: l; }
+    .face[data-face="B"] { grid-area: b; }
+    .face-title { margin-bottom: .25rem; color: var(--muted); font: 700 .68rem ui-monospace, monospace; text-align: center; }
+    .stickers { display: grid; grid-template-columns: repeat(3, 1fr); gap: .16rem; aspect-ratio: 1; }
+    .sticker { display: grid; place-items: center; min-width: 0; border-radius: .15rem; background: #293137; color: #0c0e0f; font: 800 clamp(.55rem, 1.7vw, .75rem) ui-monospace, monospace; box-shadow: inset 0 0 0 1px #ffffff26; }
+    .camera-face { width: 5.5rem; }
+    .camera-face .face { width: 100%; }
+    .chips { display: flex; flex-wrap: wrap; gap: .35rem; min-height: 1.7rem; }
+    .chip { padding: .3rem .48rem; border: 1px solid var(--line); border-radius: .35rem; background: #20292f; font: .78rem ui-monospace, monospace; }
+    .empty { color: var(--muted); font-size: .82rem; }
+    .button-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .55rem; }
+    button { min-height: 2.65rem; padding: .55rem .65rem; border: 1px solid #46515a; border-radius: .5rem; background: #222c32; color: var(--text); font: inherit; font-size: .8rem; font-weight: 600; cursor: pointer; }
     button:hover:not(:disabled) { background: #2d3941; border-color: #72808b; }
-    button:disabled { cursor: not-allowed; opacity: .4; }
+    button:disabled { cursor: not-allowed; opacity: .35; }
+    button.primary { border-color: #397653; background: #1f3a2c; color: #a8f0c5; }
     button.danger { border-color: #a64d58; background: #42252b; color: #ffb4bb; }
-    button.danger:hover:not(:disabled) { background: #613039; }
-    #command-result { min-height: 2.5rem; margin-top: 1rem; }
-    .hint { margin: 0; font-size: .8rem; }
+    .hint { margin: .8rem 0 0; font-size: .76rem; }
+    .command-result { min-height: 1.3rem; margin: .8rem 0 0; color: var(--muted); font: .78rem/1.45 ui-monospace, monospace; white-space: pre-wrap; }
+    details { margin-top: 1rem; }
+    summary { cursor: pointer; color: var(--muted); font-size: .8rem; }
+    pre { max-height: 28rem; margin: .75rem 0 0; padding: 1rem; overflow: auto; border-radius: .6rem; background: #090c0e; color: #c8d1d7; font-size: .75rem; line-height: 1.45; }
+    @media (max-width: 760px) {
+      .overview, .section-grid { grid-template-columns: 1fr; }
+      .button-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .face-area { grid-template-columns: 1fr; }
+      .camera-face { display: flex; align-items: center; width: 100%; gap: .6rem; }
+      .camera-face .face { width: 5rem; }
+    }
+    @media (max-width: 430px) {
+      main { width: min(100% - 1rem, 72rem); padding-top: .65rem; }
+      .panel { padding: .8rem; }
+      .cube-net { gap: .3rem; grid-template-columns: repeat(4, minmax(3.15rem, 1fr)); }
+      .face { padding: .25rem; }
+    }
   </style>
 </head>
 <body>
   <main>
-    <header><h1>Rubik Robot</h1><span id="status">checking…</span></header>
-    <p>Live robot state received from the Milk-V Duo through the ESP32-C6 UART gateway.</p>
-    <p>Gateway: <code id="gateway"></code></p>
-    <section>
-      <h2>Robot controls</h2>
+    <header>
+      <div><p class="eyebrow" id="gateway"></p><h1>Rubik Robot</h1></div>
+      <span class="connection" id="connection">checking…</span>
+    </header>
+
+    <section class="overview" aria-label="Robot overview">
+      <article class="card"><h3>Controller</h3><div class="metric" id="controller-state">—</div><div class="submetric" id="stand-summary">Waiting for Duo</div></article>
+      <article class="card"><h3>Operation</h3><div class="metric" id="operation-state">—</div><div class="submetric" id="operation-detail">No active operation</div><div class="progress"><span id="operation-progress"></span></div></article>
+      <article class="card"><h3>Cube</h3><div class="metric" id="cube-state">—</div><div class="submetric" id="cube-detail">No session</div></article>
+    </section>
+
+    <div class="section-grid">
+      <section class="panel">
+        <h2>Stand</h2>
+        <table>
+          <thead><tr><th>Axis</th><th>Rail</th><th>Gripper</th></tr></thead>
+          <tbody id="stand-axes"></tbody>
+        </table>
+      </section>
+
+      <section class="panel">
+        <h2>Scan · <span id="scan-summary">not started</span></h2>
+        <div class="face-area">
+          <div class="cube-net" id="cube-net"></div>
+          <div class="camera-face">
+            <h3>Camera</h3>
+            <div id="camera-preview"></div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div class="section-grid">
+      <section class="panel">
+        <h2>Solution · <span id="solution-summary">none</span></h2>
+        <div class="chips" id="solution-moves"><span class="empty">No moves</span></div>
+      </section>
+      <section class="panel">
+        <h2>Mechanical plan</h2>
+        <div id="plan"><span class="empty">No queued actions</span></div>
+      </section>
+    </div>
+
+    <section class="panel">
+      <h2>Controls</h2>
       <div class="button-grid">
         <button data-command="recover">Recover to open</button>
         <button data-command="grip">Grip cube</button>
         <button data-command="scan">Scan all faces</button>
         <button data-command="solve">Solve</button>
         <button data-command="execute">Execute solution</button>
-        <button data-command="scan-solve-execute">Scan → solve → execute</button>
+        <button class="primary" data-command="scan-solve-execute">Scan → solve → execute</button>
         <button data-command="open">Open</button>
         <button class="danger" data-command="abort">ABORT</button>
       </div>
-      <p class="hint">Commands use the session and revision IDs from the latest status snapshot.</p>
-      <pre id="command-result">No command sent.</pre>
+      <p class="hint">Session-bound commands use IDs from the latest authoritative Duo snapshot.</p>
+      <div class="command-result" id="command-result">No command sent.</div>
     </section>
-    <pre id="robot-state">Loading /api/status…</pre>
+
+    <details class="panel">
+      <summary>Raw status snapshot</summary>
+      <pre id="robot-state">Loading /api/status…</pre>
+    </details>
   </main>
+
   <script>
-    document.querySelector('#gateway').textContent = location.host;
-    const status = document.querySelector('#status');
-    const state = document.querySelector('#robot-state');
-    const commandResult = document.querySelector('#command-result');
+    const $ = selector => document.querySelector(selector);
+    $('#gateway').textContent = `ESP32-C6 · ${location.host}`;
+
+    const connection = $('#connection');
+    const rawState = $('#robot-state');
+    const commandResult = $('#command-result');
     const buttons = [...document.querySelectorAll('[data-command]')];
     let snapshot = null;
     let statusRequest = null;
@@ -62,21 +167,180 @@
     let eventSocket = null;
     let reconnectTimer = null;
 
+    const names = {
+      controller: ['Booting', 'Ready', 'Busy', 'Aborted', 'Faulted'],
+      pose: ['Unknown', 'Open', 'Canonical grip', 'Scan pose', 'Move pose', 'Transitional'],
+      face: ['U', 'R', 'F', 'D', 'L', 'B'],
+      axis: ['Left', 'Right', 'Top', 'Bottom'],
+      rail: ['Open', 'Grip'],
+      gripper: ['Frame parallel', 'Frame perpendicular', 'Frame parallel reversed'],
+      motion: ['Unknown', 'Stable', 'Moving'],
+      operation: ['Grip', 'Scan', 'Solve', 'Execute', 'Scan → solve → execute', 'Open', 'Recover to open', 'Execute moves'],
+      scan: ['None', 'In progress', 'Valid', 'Invalid'],
+      solution: ['None', 'Solving', 'Ready', 'Executing', 'Completed'],
+      action: ['Set rail', 'Set gripper', 'Wait', 'Capture face', 'Recognize face'],
+      actionState: ['Pending', 'Running', 'Completed', 'Cancelled', 'Failed'],
+      color: ['W', 'Y', 'R', 'O', 'G', 'B'],
+    };
+    const stickerColors = ['#f5f5ee', '#f3d43b', '#db3b35', '#f28a2d', '#42aa61', '#3979d4'];
     const commandPaths = {
-      recover: '/api/recover',
-      grip: '/api/grip',
-      scan: '/api/scan',
-      solve: '/api/solve',
-      execute: '/api/execute',
-      'scan-solve-execute': '/api/scan-solve-execute',
-      open: '/api/open',
-      abort: '/api/abort',
+      recover: '/api/recover', grip: '/api/grip', scan: '/api/scan', solve: '/api/solve',
+      execute: '/api/execute', 'scan-solve-execute': '/api/scan-solve-execute',
+      open: '/api/open', abort: '/api/abort',
     };
 
-    function setButtonsEnabled(enabled) {
-      for (const button of buttons) {
-        button.disabled = button.dataset.command === 'abort' ? false : !enabled;
+    function enumName(group, value, fallback = 'Unknown') {
+      return names[group]?.[value] ?? `${fallback} (${value ?? '—'})`;
+    }
+
+    function setConnection(label, isError = false) {
+      connection.textContent = label;
+      connection.classList.toggle('error', isError);
+    }
+
+    function formatAxis(status, valueGroup) {
+      if (!status) return 'unknown';
+      const current = status.current == null ? '?' : enumName(valueGroup, status.current);
+      const target = status.target == null ? '?' : enumName(valueGroup, status.target);
+      if (status.motion === 2) return `${current} → ${target}`;
+      if (status.motion === 1) return current;
+      return 'unknown';
+    }
+
+    function createFace(faceName, recognized) {
+      const face = document.createElement('div');
+      face.className = 'face';
+      if (faceName) face.dataset.face = faceName;
+      const title = document.createElement('div');
+      title.className = 'face-title';
+      title.textContent = faceName || 'LIVE';
+      face.append(title);
+      const stickers = document.createElement('div');
+      stickers.className = 'stickers';
+      for (let index = 0; index < 9; index++) {
+        const color = recognized?.colors?.[index];
+        const confidence = recognized?.confidence?.[index];
+        const sticker = document.createElement('div');
+        sticker.className = 'sticker';
+        sticker.textContent = color == null ? '' : names.color[color] ?? '?';
+        sticker.style.background = stickerColors[color] ?? '#293137';
+        if (confidence != null) {
+          const percent = Math.round(confidence * 100 / 255);
+          sticker.style.opacity = String(.55 + confidence / 255 * .45);
+          sticker.title = `${percent}% confidence`;
+        }
+        stickers.append(sticker);
       }
+      face.append(stickers);
+      return face;
+    }
+
+    function renderStand(value) {
+      const body = $('#stand-axes');
+      body.replaceChildren();
+      for (let index = 0; index < 4; index++) {
+        const row = document.createElement('tr');
+        for (const text of [names.axis[index], formatAxis(value?.rails?.[index], 'rail'), formatAxis(value?.grippers?.[index], 'gripper')]) {
+          const cell = document.createElement('td');
+          const pill = document.createElement('span');
+          pill.className = 'state-pill';
+          pill.textContent = text;
+          cell.append(pill);
+          row.append(cell);
+        }
+        body.append(row);
+      }
+    }
+
+    function renderFaces(scan) {
+      const net = $('#cube-net');
+      net.replaceChildren();
+      for (let index = 0; index < 6; index++) net.append(createFace(names.face[index], scan?.faces?.[index]));
+      const preview = $('#camera-preview');
+      preview.replaceChildren(createFace(null, scan?.camera_face));
+      const scanned = scan?.scanned_faces ?? 0;
+      const count = names.face.filter((_, index) => scanned & (1 << index)).length;
+      const current = scan?.current_face == null ? '' : ` · camera ${enumName('face', scan.current_face)}`;
+      $('#scan-summary').textContent = `${enumName('scan', scan?.state)} · ${count}/6${current}`;
+    }
+
+    function renderSolution(solution) {
+      const count = solution?.move_count ?? 0;
+      const completed = solution?.completed_moves ?? 0;
+      $('#solution-summary').textContent = `${enumName('solution', solution?.state)} · ${completed}/${count}`;
+      const moves = $('#solution-moves');
+      moves.replaceChildren();
+      for (let index = 0; index < count; index++) {
+        const move = solution.moves[index];
+        const chip = document.createElement('span');
+        chip.className = 'chip';
+        chip.textContent = `${enumName('face', move.face)}${['', "'", '2'][move.turn] ?? '?'}`;
+        if (index < completed) chip.style.opacity = '.45';
+        moves.append(chip);
+      }
+      if (!count) {
+        const empty = document.createElement('span');
+        empty.className = 'empty';
+        empty.textContent = 'No moves';
+        moves.append(empty);
+      }
+    }
+
+    function actionTarget(action) {
+      if (action.rail_target != null) return enumName('rail', action.rail_target);
+      if (action.gripper_target != null) return enumName('gripper', action.gripper_target);
+      if (action.face != null) return `face ${enumName('face', action.face)}`;
+      if (action.duration_ms) return `${action.duration_ms} ms`;
+      return '—';
+    }
+
+    function renderPlan(value) {
+      const plan = $('#plan');
+      plan.replaceChildren();
+      const actions = (value.plan ?? []).slice(0, value.plan_count ?? 0).filter(Boolean);
+      if (!actions.length) {
+        const empty = document.createElement('span');
+        empty.className = 'empty';
+        empty.textContent = 'No queued actions';
+        plan.append(empty);
+        return;
+      }
+      const table = document.createElement('table');
+      const body = document.createElement('tbody');
+      for (const action of actions) {
+        const row = document.createElement('tr');
+        const axis = action.axis == null ? '' : ` · ${enumName('axis', action.axis)}`;
+        for (const text of [`#${action.id}`, `${enumName('action', action.kind)}${axis}`, actionTarget(action), enumName('actionState', action.state)]) {
+          const cell = document.createElement('td');
+          cell.textContent = text;
+          row.append(cell);
+        }
+        body.append(row);
+      }
+      table.append(body);
+      plan.append(table);
+    }
+
+    function renderSnapshot(value) {
+      rawState.textContent = JSON.stringify(value, null, 2);
+      $('#controller-state').textContent = enumName('controller', value.controller);
+      const pose = enumName('pose', value.stand?.pose?.kind);
+      const camera = value.stand?.pose?.camera_face == null ? '' : ` · ${enumName('face', value.stand.pose.camera_face)} at camera`;
+      $('#stand-summary').textContent = `${pose}${camera} · PWM ${value.stand?.outputs_enabled ? 'on' : 'off'}`;
+
+      const operation = value.active_operation;
+      $('#operation-state').textContent = operation ? enumName('operation', operation.kind) : 'Idle';
+      $('#operation-detail').textContent = operation ? `#${operation.id} · action ${operation.current_action}/${operation.action_count}` : 'No active operation';
+      const progress = operation?.action_count ? operation.current_action * 100 / operation.action_count : 0;
+      $('#operation-progress').style.width = `${Math.min(100, progress)}%`;
+
+      const session = value.cube_session?.id;
+      $('#cube-state').textContent = session == null ? 'No cube' : `Session #${session}`;
+      $('#cube-detail').textContent = `${enumName('scan', value.scan?.state)} scan · ${enumName('solution', value.solution?.state)} solution`;
+      renderStand(value.stand);
+      renderFaces(value.scan);
+      renderSolution(value.solution);
+      renderPlan(value);
     }
 
     function payloadFor(command) {
@@ -84,28 +348,23 @@
       const scanRevision = snapshot?.scan?.revision;
       const solutionId = snapshot?.solution?.id;
       if (command === 'recover' || command === 'grip' || command === 'abort') return null;
-      if (command === 'scan' || command === 'scan-solve-execute' || command === 'open') {
-        return sessionId == null ? undefined : { session_id: sessionId };
-      }
-      if (command === 'solve') {
-        return sessionId == null || scanRevision == null
-          ? undefined
-          : { session_id: sessionId, scan_revision: scanRevision };
-      }
+      if (command === 'scan' || command === 'scan-solve-execute' || command === 'open') return sessionId == null ? undefined : { session_id: sessionId };
+      if (command === 'solve') return sessionId == null || scanRevision == null ? undefined : { session_id: sessionId, scan_revision: scanRevision };
       if (command === 'execute') {
         const sourceRevision = snapshot?.solution?.source_scan_revision ?? scanRevision;
-        return sessionId == null || sourceRevision == null || solutionId == null
-          ? undefined
-          : { session_id: sessionId, scan_revision: sourceRevision, solution_id: solutionId };
+        return sessionId == null || sourceRevision == null || solutionId == null ? undefined : { session_id: sessionId, scan_revision: sourceRevision, solution_id: solutionId };
       }
     }
 
     function updateButtons() {
-      const online = snapshot !== null;
       for (const button of buttons) {
         const command = button.dataset.command;
-        button.disabled = command === 'abort' ? false : !online || payloadFor(command) === undefined;
+        button.disabled = command === 'abort' ? false : snapshot === null || payloadFor(command) === undefined;
       }
+    }
+
+    function setButtonsEnabled(enabled) {
+      for (const button of buttons) button.disabled = button.dataset.command === 'abort' ? false : !enabled;
     }
 
     async function refreshStatus() {
@@ -118,15 +377,13 @@
             const response = await fetch('/api/status', { cache: 'no-store' });
             if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
             snapshot = await response.json();
-            state.textContent = JSON.stringify(snapshot, null, 2);
-            status.textContent = eventSocket?.readyState === WebSocket.OPEN ? 'live' : 'online';
-            status.classList.remove('error');
+            renderSnapshot(snapshot);
+            setConnection(eventSocket?.readyState === WebSocket.OPEN ? 'live' : 'online');
             updateButtons();
           } catch (error) {
             snapshot = null;
-            state.textContent = `Status unavailable: ${error.message}`;
-            status.textContent = 'offline';
-            status.classList.add('error');
+            rawState.textContent = `Status unavailable: ${error.message}`;
+            setConnection('offline', true);
             updateButtons();
           }
         }
@@ -139,24 +396,17 @@
       const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
       const socket = new WebSocket(`${scheme}://${location.host}/api/events`);
       eventSocket = socket;
-
-      socket.addEventListener('open', () => {
-        status.textContent = 'live';
-        status.classList.remove('error');
-        refreshStatus();
-      });
+      socket.addEventListener('open', () => { setConnection('live'); refreshStatus(); });
       socket.addEventListener('message', event => {
         try {
-          const notification = JSON.parse(event.data);
-          if (notification.event) refreshStatus();
+          if (JSON.parse(event.data).event) refreshStatus();
         } catch {
           socket.close(1003, 'invalid event');
         }
       });
       socket.addEventListener('close', () => {
         if (eventSocket !== socket) return;
-        status.textContent = snapshot ? 'reconnecting…' : 'offline';
-        status.classList.toggle('error', !snapshot);
+        setConnection(snapshot ? 'reconnecting…' : 'offline', !snapshot);
         reconnectTimer = setTimeout(connectEvents, 1000);
       });
       socket.addEventListener('error', () => socket.close());
@@ -166,7 +416,7 @@
       if (command !== 'abort' && !confirm(`Send ${command} to the robot?`)) return;
       const payload = payloadFor(command);
       if (payload === undefined) {
-        commandResult.textContent = 'The latest status does not contain the IDs required by this command.';
+        commandResult.textContent = 'Required session, scan revision, or solution ID is unavailable.';
         return;
       }
       setButtonsEnabled(false);
@@ -190,10 +440,9 @@
       }
     }
 
-    for (const button of buttons) {
-      button.addEventListener('click', () => sendCommand(button.dataset.command));
-    }
-
+    for (const button of buttons) button.addEventListener('click', () => sendCommand(button.dataset.command));
+    renderStand(null);
+    renderFaces(null);
     refreshStatus();
     connectEvents();
   </script>

@@ -82,7 +82,10 @@ http://192.168.4.1/
 ```
 
 The page opens `GET /api/events` as a WebSocket and renders the complete JSON
-snapshot returned by the Duo daemon. A protocol event makes the page refresh
+snapshot returned by the Duo daemon as a structured dashboard: controller and
+operation progress, stand axes, recognized cube net with sticker confidence,
+solution moves and the mechanical plan. The raw snapshot remains available in
+a collapsed diagnostic section. A protocol event makes the page refresh
 `GET /api/status`; reconnecting the WebSocket also forces a full refresh. The
 default SSID is `Rubik Robot`; the default password is `ChangeMe`.
 
@@ -161,5 +164,6 @@ request caching, deadlines and protocol events remain real.
 
 ## Next milestone
 
-Replace the raw JSON status dump with a structured robot dashboard while
-keeping Duo as the only source of truth.
+Exercise the dashboard against `rubik-robotd-sim` and then the physical scan
+workflow. The next software layer is persistent configuration and operational
+error presentation rather than another robot-state implementation in C6.

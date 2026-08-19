@@ -2763,3 +2763,27 @@ cargo run --release
 Следующий UI milestone — заменить технический JSON dump структурированным
 dashboard стенда, scan progress и solution progress, не меняя protocol или Duo
 state machine.
+
+#### Structured web dashboard
+
+Embedded web UI отображает тот же `StatusSnapshot` как рабочую панель вместо
+единственного raw JSON блока:
+
+- controller, logical stand pose и текущую operation с progress;
+- commanded rail/gripper state для четырёх осей;
+- физическую цветовую развёртку `U/R/F/D/L/B` и текущий camera preview;
+- confidence каждого стикера через opacity и tooltip;
+- solver moves с отметкой уже выполненной части;
+- bounded preview механического плана;
+- session-bound controls и отдельный `Abort`.
+
+Wire enums по-прежнему приходят как стабильные числовые значения
+`serde_repr`; JavaScript только переводит их в подписи. Решения о допустимости
+команд остаются в Duo: UI скрывает команды без необходимых session/revision ID,
+но окончательный admission выполняет daemon. Полный JSON snapshot сохранён в
+сворачиваемом diagnostic section.
+
+Проверка на C6 выполняется тем же release flash, затем сначала с
+`rubik-robotd-sim`, после чего с физическим scan workflow. Визуально нужно
+сверить порядок граней и стикеров, confidence проблемных red/orange detection,
+рост action/move progress и корректное восстановление после WebSocket reconnect.
