@@ -20,7 +20,7 @@
     }
     * { box-sizing: border-box; }
     body { margin: 0; min-height: 100vh; background: radial-gradient(circle at 50% 0, #172127 0, var(--bg) 35rem); color: var(--text); }
-    main { width: min(72rem, calc(100% - 1.5rem)); margin: 0 auto; padding: 1.5rem 0 3rem; }
+    main { width: min(68rem, calc(100% - 1.5rem)); margin: 0 auto; padding: 1.25rem 0 2rem; }
     header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .5rem 0 1.25rem; }
     h1 { margin: 0; font-size: clamp(1.65rem, 5vw, 2.5rem); letter-spacing: -.04em; }
     h2 { margin: 0 0 1rem; font-size: .8rem; color: var(--muted); letter-spacing: .12em; text-transform: uppercase; }
@@ -30,21 +30,26 @@
     .eyebrow { margin: 0 0 .2rem; color: var(--muted); font-size: .75rem; letter-spacing: .13em; text-transform: uppercase; }
     .connection { padding: .45rem .75rem; border-radius: 999px; background: #203128; color: var(--ok); font: 600 .8rem ui-monospace, monospace; }
     .connection.error { background: #3a2528; color: var(--danger); }
-    .panel { margin-top: 1rem; padding: 1.15rem; border: 1px solid var(--line); border-radius: .9rem; background: color-mix(in srgb, var(--panel) 94%, transparent); box-shadow: 0 .8rem 3rem #0003; }
-    .overview { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .8rem; }
-    .card { min-width: 0; padding: 1rem; border: 1px solid var(--line); border-radius: .75rem; background: var(--panel-2); }
-    .metric { margin-top: .4rem; font-size: 1.1rem; font-weight: 700; overflow-wrap: anywhere; }
+    .panel { padding: 1rem; border: 1px solid var(--line); border-radius: .9rem; background: color-mix(in srgb, var(--panel) 94%, transparent); box-shadow: 0 .8rem 3rem #0003; }
+    .workspace { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(18rem, .65fr); gap: 1rem; align-items: stretch; }
+    .overview { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .7rem; margin-top: .8rem; }
+    .card { min-width: 0; padding: .75rem .9rem; border: 1px solid var(--line); border-radius: .7rem; background: var(--panel-2); }
+    .metric { margin-top: .3rem; font-size: 1rem; font-weight: 700; overflow-wrap: anywhere; }
     .submetric { margin-top: .35rem; color: var(--muted); font-size: .8rem; }
     .progress { height: .4rem; margin-top: .75rem; overflow: hidden; border-radius: 999px; background: #0c1012; }
     .progress > span { display: block; width: 0; height: 100%; background: var(--ok); transition: width .15s ease; }
-    .section-grid { display: grid; grid-template-columns: minmax(18rem, .85fr) minmax(20rem, 1.15fr); gap: 1rem; }
+    .details-panel { margin-top: .8rem; }
+    .tabs { display: flex; gap: .35rem; margin: -.2rem 0 .8rem; overflow-x: auto; }
+    .tab { min-height: 2.1rem; padding: .35rem .7rem; border-color: transparent; background: transparent; color: var(--muted); white-space: nowrap; }
+    .tab.active { border-color: var(--line); background: #222c32; color: var(--text); }
+    .tab-panel { display: none; min-height: 8.5rem; }
+    .tab-panel.active { display: block; }
     table { width: 100%; border-collapse: collapse; font-size: .85rem; }
     th, td { padding: .55rem .45rem; border-bottom: 1px solid #293239; text-align: left; }
     th { color: var(--muted); font-size: .72rem; letter-spacing: .08em; text-transform: uppercase; }
     tr:last-child td { border-bottom: 0; }
     .state-pill { display: inline-block; padding: .18rem .4rem; border-radius: .3rem; background: #222c32; font: .75rem ui-monospace, monospace; }
-    .face-area { display: grid; grid-template-columns: minmax(0, 1fr) 5.5rem; gap: 1rem; align-items: start; }
-    .cube-net { display: grid; grid-template: ". u . ." auto "l f r b" auto ". d . ." auto / repeat(4, minmax(3.6rem, 1fr)); gap: .55rem; }
+    .cube-net { display: grid; grid-template: ". u . ." auto "l f r b" auto ". d . ." auto / repeat(4, minmax(3.6rem, 1fr)); gap: .45rem; width: min(100%, 35rem); margin: 0 auto; }
     .face { min-width: 0; padding: .35rem; border: 1px solid var(--line); border-radius: .45rem; background: #0e1316; }
     .face[data-face="U"] { grid-area: u; }
     .face[data-face="R"] { grid-area: r; }
@@ -55,12 +60,10 @@
     .face-title { margin-bottom: .25rem; color: var(--muted); font: 700 .68rem ui-monospace, monospace; text-align: center; }
     .stickers { display: grid; grid-template-columns: repeat(3, 1fr); gap: .16rem; aspect-ratio: 1; }
     .sticker { display: grid; place-items: center; min-width: 0; border-radius: .15rem; background: #293137; color: #0c0e0f; font: 800 clamp(.55rem, 1.7vw, .75rem) ui-monospace, monospace; box-shadow: inset 0 0 0 1px #ffffff26; }
-    .camera-face { width: 5.5rem; }
-    .camera-face .face { width: 100%; }
     .chips { display: flex; flex-wrap: wrap; gap: .35rem; min-height: 1.7rem; }
     .chip { padding: .3rem .48rem; border: 1px solid var(--line); border-radius: .35rem; background: #20292f; font: .78rem ui-monospace, monospace; }
     .empty { color: var(--muted); font-size: .82rem; }
-    .button-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .55rem; }
+    .button-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .5rem; }
     button { min-height: 2.65rem; padding: .55rem .65rem; border: 1px solid #46515a; border-radius: .5rem; background: #222c32; color: var(--text); font: inherit; font-size: .8rem; font-weight: 600; cursor: pointer; }
     button:hover:not(:disabled) { background: #2d3941; border-color: #72808b; }
     button:disabled { cursor: not-allowed; opacity: .35; }
@@ -68,18 +71,14 @@
     button.danger { border-color: #a64d58; background: #42252b; color: #ffb4bb; }
     .hint { margin: .8rem 0 0; font-size: .76rem; }
     .command-result { min-height: 1.3rem; margin: .8rem 0 0; color: var(--muted); font: .78rem/1.45 ui-monospace, monospace; white-space: pre-wrap; }
-    details { margin-top: 1rem; }
-    summary { cursor: pointer; color: var(--muted); font-size: .8rem; }
-    pre { max-height: 28rem; margin: .75rem 0 0; padding: 1rem; overflow: auto; border-radius: .6rem; background: #090c0e; color: #c8d1d7; font-size: .75rem; line-height: 1.45; }
+    pre { max-height: 14rem; margin: 0; padding: .8rem; overflow: auto; border-radius: .6rem; background: #090c0e; color: #c8d1d7; font-size: .72rem; line-height: 1.4; }
     @media (max-width: 760px) {
-      .overview, .section-grid { grid-template-columns: 1fr; }
+      .workspace { grid-template-columns: 1fr; }
+      .overview { grid-template-columns: 1fr; }
       .button-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .face-area { grid-template-columns: 1fr; }
-      .camera-face { display: flex; align-items: center; width: 100%; gap: .6rem; }
-      .camera-face .face { width: 5rem; }
     }
     @media (max-width: 430px) {
-      main { width: min(100% - 1rem, 72rem); padding-top: .65rem; }
+      main { width: min(100% - 1rem, 68rem); padding-top: .65rem; }
       .panel { padding: .8rem; }
       .cube-net { gap: .3rem; grid-template-columns: repeat(4, minmax(3.15rem, 1fr)); }
       .face { padding: .25rem; }
@@ -93,64 +92,59 @@
       <span class="connection" id="connection">checking…</span>
     </header>
 
+    <div class="workspace">
+      <section class="panel">
+        <h2>Scan · <span id="scan-summary">not started</span></h2>
+        <div class="cube-net" id="cube-net"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Controls</h2>
+        <div class="button-grid">
+          <button data-command="recover">Recover to open</button>
+          <button data-command="grip">Grip cube</button>
+          <button data-command="scan">Scan all faces</button>
+          <button data-command="solve">Solve</button>
+          <button data-command="execute">Execute solution</button>
+          <button class="primary" data-command="scan-solve-execute">Scan → solve → execute</button>
+          <button data-command="open">Open</button>
+          <button class="danger" data-command="abort">ABORT</button>
+        </div>
+        <p class="hint">Commands use IDs from the latest Duo snapshot.</p>
+        <div class="command-result" id="command-result">No command sent.</div>
+      </section>
+    </div>
+
     <section class="overview" aria-label="Robot overview">
       <article class="card"><h3>Controller</h3><div class="metric" id="controller-state">—</div><div class="submetric" id="stand-summary">Waiting for Duo</div></article>
       <article class="card"><h3>Operation</h3><div class="metric" id="operation-state">—</div><div class="submetric" id="operation-detail">No active operation</div><div class="progress"><span id="operation-progress"></span></div></article>
       <article class="card"><h3>Cube</h3><div class="metric" id="cube-state">—</div><div class="submetric" id="cube-detail">No session</div></article>
     </section>
 
-    <div class="section-grid">
-      <section class="panel">
-        <h2>Stand</h2>
+    <section class="panel details-panel">
+      <nav class="tabs" aria-label="Robot details">
+        <button class="tab active" data-tab="stand">Stand</button>
+        <button class="tab" data-tab="solution">Solution</button>
+        <button class="tab" data-tab="plan">Plan</button>
+        <button class="tab" data-tab="raw">Raw</button>
+      </nav>
+      <div class="tab-panel active" data-panel="stand">
         <table>
           <thead><tr><th>Axis</th><th>Rail</th><th>Gripper</th></tr></thead>
           <tbody id="stand-axes"></tbody>
         </table>
-      </section>
-
-      <section class="panel">
-        <h2>Scan · <span id="scan-summary">not started</span></h2>
-        <div class="face-area">
-          <div class="cube-net" id="cube-net"></div>
-          <div class="camera-face">
-            <h3>Camera</h3>
-            <div id="camera-preview"></div>
-          </div>
-        </div>
-      </section>
-    </div>
-
-    <div class="section-grid">
-      <section class="panel">
+      </div>
+      <div class="tab-panel" data-panel="solution">
         <h2>Solution · <span id="solution-summary">none</span></h2>
         <div class="chips" id="solution-moves"><span class="empty">No moves</span></div>
-      </section>
-      <section class="panel">
-        <h2>Mechanical plan</h2>
-        <div id="plan"><span class="empty">No queued actions</span></div>
-      </section>
-    </div>
-
-    <section class="panel">
-      <h2>Controls</h2>
-      <div class="button-grid">
-        <button data-command="recover">Recover to open</button>
-        <button data-command="grip">Grip cube</button>
-        <button data-command="scan">Scan all faces</button>
-        <button data-command="solve">Solve</button>
-        <button data-command="execute">Execute solution</button>
-        <button class="primary" data-command="scan-solve-execute">Scan → solve → execute</button>
-        <button data-command="open">Open</button>
-        <button class="danger" data-command="abort">ABORT</button>
       </div>
-      <p class="hint">Session-bound commands use IDs from the latest authoritative Duo snapshot.</p>
-      <div class="command-result" id="command-result">No command sent.</div>
+      <div class="tab-panel" data-panel="plan">
+        <div id="plan"><span class="empty">No queued actions</span></div>
+      </div>
+      <div class="tab-panel" data-panel="raw">
+        <pre id="robot-state">Loading /api/status…</pre>
+      </div>
     </section>
-
-    <details class="panel">
-      <summary>Raw status snapshot</summary>
-      <pre id="robot-state">Loading /api/status…</pre>
-    </details>
   </main>
 
   <script>
@@ -255,9 +249,10 @@
     function renderFaces(scan) {
       const net = $('#cube-net');
       net.replaceChildren();
-      for (let index = 0; index < 6; index++) net.append(createFace(names.face[index], scan?.faces?.[index]));
-      const preview = $('#camera-preview');
-      preview.replaceChildren(createFace(null, scan?.camera_face));
+      for (let index = 0; index < 6; index++) {
+        const recognized = scan?.faces?.[index] ?? (scan?.current_face === index ? scan.camera_face : null);
+        net.append(createFace(names.face[index], recognized));
+      }
       const scanned = scan?.scanned_faces ?? 0;
       const count = names.face.filter((_, index) => scanned & (1 << index)).length;
       const current = scan?.current_face == null ? '' : ` · camera ${enumName('face', scan.current_face)}`;
@@ -440,6 +435,12 @@
       }
     }
 
+    for (const tab of document.querySelectorAll('[data-tab]')) {
+      tab.addEventListener('click', () => {
+        for (const item of document.querySelectorAll('[data-tab]')) item.classList.toggle('active', item === tab);
+        for (const panel of document.querySelectorAll('[data-panel]')) panel.classList.toggle('active', panel.dataset.panel === tab.dataset.tab);
+      });
+    }
     for (const button of buttons) button.addEventListener('click', () => sendCommand(button.dataset.command));
     renderStand(null);
     renderFaces(null);

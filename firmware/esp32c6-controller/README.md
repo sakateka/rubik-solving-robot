@@ -83,9 +83,9 @@ http://192.168.4.1/
 
 The page opens `GET /api/events` as a WebSocket and renders the complete JSON
 snapshot returned by the Duo daemon as a structured dashboard: controller and
-operation progress, stand axes, recognized cube net with sticker confidence,
-solution moves and the mechanical plan. The raw snapshot remains available in
-a collapsed diagnostic section. A protocol event makes the page refresh
+operation progress, stand axes, one `U / L F R B / D` cube net with sticker
+confidence, solution moves and the mechanical plan. Stand, solution, plan and
+raw data share one tabbed detail panel. A protocol event makes the page refresh
 `GET /api/status`; reconnecting the WebSocket also forces a full refresh. The
 default SSID is `Rubik Robot`; the default password is `ChangeMe`.
 

@@ -2771,7 +2771,8 @@ Embedded web UI отображает тот же `StatusSnapshot` как раб�
 
 - controller, logical stand pose и текущую operation с progress;
 - commanded rail/gripper state для четырёх осей;
-- физическую цветовую развёртку `U/R/F/D/L/B` и текущий camera preview;
+- одну физическую цветовую развёртку `U / L F R B / D`; текущий camera preview
+  подставляется в соответствующую позицию этой же развёртки;
 - confidence каждого стикера через opacity и tooltip;
 - solver moves с отметкой уже выполненной части;
 - bounded preview механического плана;
@@ -2780,8 +2781,10 @@ Embedded web UI отображает тот же `StatusSnapshot` как раб�
 Wire enums по-прежнему приходят как стабильные числовые значения
 `serde_repr`; JavaScript только переводит их в подписи. Решения о допустимости
 команд остаются в Duo: UI скрывает команды без необходимых session/revision ID,
-но окончательный admission выполняет daemon. Полный JSON snapshot сохранён в
-сворачиваемом diagnostic section.
+но окончательный admission выполняет daemon. Главный экран компактный: scan и
+controls расположены рядом, controller/operation/cube идут следующей строкой,
+а Stand, Solution, Plan и Raw занимают один переключаемый detail panel вместо
+длинной страницы.
 
 Проверка на C6 выполняется тем же release flash, затем сначала с
 `rubik-robotd-sim`, после чего с физическим scan workflow. Визуально нужно
