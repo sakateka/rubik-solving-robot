@@ -16,6 +16,16 @@
     code { color: #f2cb69; }
     pre { margin: 1.5rem 0 0; padding: 1rem; overflow: auto; border-radius: .65rem; background: #0d0f11; color: #c8d1d7; line-height: 1.45; }
     #status.error { background: #3a2528; color: #ff9ca5; }
+    section { margin-top: 1.5rem; padding-top: 1.5rem; border-top: 1px solid #30363b; }
+    h2 { margin: 0 0 1rem; font-size: 1rem; color: #c8d1d7; }
+    .button-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .65rem; }
+    button { min-height: 2.5rem; padding: .55rem .7rem; border: 1px solid #46515a; border-radius: .5rem; background: #222a30; color: #edf0f2; font: inherit; cursor: pointer; }
+    button:hover:not(:disabled) { background: #2d3941; border-color: #72808b; }
+    button:disabled { cursor: not-allowed; opacity: .4; }
+    button.danger { border-color: #a64d58; background: #42252b; color: #ffb4bb; }
+    button.danger:hover:not(:disabled) { background: #613039; }
+    #command-result { min-height: 2.5rem; margin-top: 1rem; }
+    .hint { margin: 0; font-size: .8rem; }
   </style>
 </head>
 <body>
@@ -23,25 +33,132 @@
     <header><h1>Rubik Robot</h1><span id="status">checking…</span></header>
     <p>Live robot state received from the Milk-V Duo through the ESP32-C6 UART gateway.</p>
     <p>Gateway: <code id="gateway"></code></p>
+    <section>
+      <h2>Robot controls</h2>
+      <div class="button-grid">
+        <button data-command="recover">Recover to open</button>
+        <button data-command="grip">Grip cube</button>
+        <button data-command="scan">Scan all faces</button>
+        <button data-command="solve">Solve</button>
+        <button data-command="execute">Execute solution</button>
+        <button data-command="scan-solve-execute">Scan → solve → execute</button>
+        <button data-command="open">Open</button>
+        <button class="danger" data-command="abort">ABORT</button>
+      </div>
+      <p class="hint">Commands use the session and revision IDs from the latest status snapshot.</p>
+      <pre id="command-result">No command sent.</pre>
+    </section>
     <pre id="robot-state">Loading /api/status…</pre>
   </main>
   <script>
     document.querySelector('#gateway').textContent = location.host;
     const status = document.querySelector('#status');
     const state = document.querySelector('#robot-state');
+    const commandResult = document.querySelector('#command-result');
+    const buttons = [...document.querySelectorAll('[data-command]')];
+    let snapshot = null;
+    let statusRequest = null;
+
+    const commandPaths = {
+      recover: '/api/recover',
+      grip: '/api/grip',
+      scan: '/api/scan',
+      solve: '/api/solve',
+      execute: '/api/execute',
+      'scan-solve-execute': '/api/scan-solve-execute',
+      open: '/api/open',
+      abort: '/api/abort',
+    };
+
+    function setButtonsEnabled(enabled) {
+      for (const button of buttons) {
+        button.disabled = button.dataset.command === 'abort' ? false : !enabled;
+      }
+    }
+
+    function payloadFor(command) {
+      const sessionId = snapshot?.cube_session?.id;
+      const scanRevision = snapshot?.scan?.revision;
+      const solutionId = snapshot?.solution?.id;
+      if (command === 'recover' || command === 'grip' || command === 'abort') return null;
+      if (command === 'scan' || command === 'scan-solve-execute' || command === 'open') {
+        return sessionId == null ? undefined : { session_id: sessionId };
+      }
+      if (command === 'solve') {
+        return sessionId == null || scanRevision == null
+          ? undefined
+          : { session_id: sessionId, scan_revision: scanRevision };
+      }
+      if (command === 'execute') {
+        const sourceRevision = snapshot?.solution?.source_scan_revision ?? scanRevision;
+        return sessionId == null || sourceRevision == null || solutionId == null
+          ? undefined
+          : { session_id: sessionId, scan_revision: sourceRevision, solution_id: solutionId };
+      }
+    }
+
+    function updateButtons() {
+      const online = snapshot !== null;
+      for (const button of buttons) {
+        const command = button.dataset.command;
+        button.disabled = command === 'abort' ? false : !online || payloadFor(command) === undefined;
+      }
+    }
 
     async function refreshStatus() {
-      try {
-        const response = await fetch('/api/status', { cache: 'no-store' });
-        if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
-        state.textContent = JSON.stringify(await response.json(), null, 2);
-        status.textContent = 'online';
-        status.classList.remove('error');
-      } catch (error) {
-        state.textContent = `Status unavailable: ${error.message}`;
-        status.textContent = 'offline';
-        status.classList.add('error');
+      if (statusRequest) return statusRequest;
+      statusRequest = (async () => {
+        try {
+          const response = await fetch('/api/status', { cache: 'no-store' });
+          if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
+          snapshot = await response.json();
+          state.textContent = JSON.stringify(snapshot, null, 2);
+          status.textContent = 'online';
+          status.classList.remove('error');
+          updateButtons();
+        } catch (error) {
+          snapshot = null;
+          state.textContent = `Status unavailable: ${error.message}`;
+          status.textContent = 'offline';
+          status.classList.add('error');
+          updateButtons();
+        } finally {
+          statusRequest = null;
+        }
+      })();
+      return statusRequest;
+    }
+
+    async function sendCommand(command) {
+      if (command !== 'abort' && !confirm(`Send ${command} to the robot?`)) return;
+      const payload = payloadFor(command);
+      if (payload === undefined) {
+        commandResult.textContent = 'The latest status does not contain the IDs required by this command.';
+        return;
       }
+      setButtonsEnabled(false);
+      commandResult.textContent = `Sending ${command}…`;
+      try {
+        const options = { method: 'POST' };
+        if (payload !== null) {
+          options.headers = { 'Content-Type': 'application/json' };
+          options.body = JSON.stringify(payload);
+        }
+        const response = await fetch(commandPaths[command], options);
+        const body = await response.text();
+        let parsed;
+        try { parsed = JSON.parse(body); } catch { parsed = body; }
+        commandResult.textContent = `${response.status} ${response.statusText}\n${JSON.stringify(parsed, null, 2)}`;
+        if (!response.ok) throw new Error(`command rejected (${response.status})`);
+      } catch (error) {
+        commandResult.textContent += `\n${error.message}`;
+      } finally {
+        await refreshStatus();
+      }
+    }
+
+    for (const button of buttons) {
+      button.addEventListener('click', () => sendCommand(button.dataset.command));
     }
 
     async function pollStatus() {

@@ -2519,5 +2519,7 @@ curl -X POST http://192.168.4.1/api/abort
 ```
 
 Полный набор JSON payloads записан в
-`firmware/esp32c6-controller/README.md`. Следующий этап — WebSocket events, затем
-кнопки и визуализация workflow во встроенном browser UI.
+`firmware/esp32c6-controller/README.md`. Во встроенную страницу уже добавлена
+тестовая панель с кнопками этих операций: IDs для session-bound команд берутся
+из последнего status snapshot, а `abort` остаётся доступным без подтверждения.
+Следующий этап — WebSocket events и визуализация прогресса workflow без polling.

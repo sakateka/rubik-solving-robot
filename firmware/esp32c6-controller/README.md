@@ -123,8 +123,8 @@ Accepted operations return HTTP `202`, for example:
 ```
 
 Duo admission failures return HTTP `409` and preserve its rejection reason and
-controller state. The current web page still uses status polling; command
-buttons are added after the event WebSocket is available.
+controller state. The current web page exposes these commands as test buttons
+and continues to use status polling until the event WebSocket is available.
 
 ## Quiet end-to-end check
 
@@ -142,6 +142,6 @@ request caching, deadlines and protocol events remain real.
 
 ## Next milestone
 
-Add a WebSocket event stream and command controls to the embedded page. Robot
-decisions and state remain on the Duo; C6 only adapts HTTP/WebSocket messages to
-the existing link protocol.
+Add a WebSocket event stream and replace status polling in the embedded page.
+Robot decisions and state remain on the Duo; C6 only adapts HTTP/WebSocket
+messages to the existing link protocol.
