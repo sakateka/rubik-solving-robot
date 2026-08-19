@@ -1488,14 +1488,14 @@ inference + postprocess` (около 53 ms при уже запущенных ca
 
 1. **Rail servo** через шестерню перемещает направляющую с захватом по рельсе
    к кубу и от него.
-2. **Wrist servo** вращает П-образный захват вокруг его рабочей оси.
+2. **Gripper rotation servo** вращает П-образный захват вокруг его рабочей оси.
 
 Итого восемь servo: четыре линейно подводят/отводят захваты и четыре задают
 поворот соответствующего захвата. Типы и назначение осей различаются:
 
 | Оси | Servo | Механическая роль |
 | --- | --- | --- |
-| 4 wrist axes | **DSSERVO DS3218-180** (номинально 180°, 20 kg·cm) | Поворот П-образных захватов |
+| 4 оси вращения захватов | **DSSERVO DS3218-180** (номинально 180°, 20 kg·cm) | Поворот П-образных захватов |
 | 4 rail axes | **TowerPro MG996R 180°** | Перемещение направляющих с захватами через шестерни |
 
 Чтобы повернуть, например, левую или правую грань, противоположная пара
@@ -1516,7 +1516,7 @@ driver по I²C. Будущий actuator driver на Duo будет писат�
 безопасные действия вроде `grip(North)`, `release(East)`,
 `rotate_face(Right, QuarterTurn)` и `move_to_scan_pose(PoseId)`. Реальный
 servo driver будет реализацией этих действий после калибровки границ рельс,
-углов wrist и безопасной последовательности захватов. До подключения железа
+углов захватов и безопасной последовательности движений. До подключения железа
 planner можно тестировать как state machine на симуляторе поз куба.
 
 ### 10.28. Solver core: `Face` → facelets → min2phase
@@ -2154,7 +2154,7 @@ return/open: operator видит ошибку и сам выбирает `off`/`
 
 Из исходной `grip` pose непосредственно доступны только `L`, `R`, `U`, `D`:
 их собственные rails закрыты, а соседние grippers остаются в
-`frame_perpendicular` и удерживают остальной cube. Для всех четырёх wrist
+`frame_perpendicular` и удерживают остальной cube. Для всех четырёх захватов
 servos измерена одна и та же convention:
 
 | face | gripper | `P / ⟂ / PR` (µs) | `⟂ → P` | `⟂ → PR` | `P → ⟂` | `PR → ⟂` |
@@ -2214,11 +2214,11 @@ solver-а: открывает стенд в safe pose, ждёт Enter после
 pose, поэтому следующий move всегда начинается с `F` перед camera и не зависит
 от временного разворота для предыдущего `F/B`.
 
-Для quarter turn target wrist движется из `frame_perpendicular` в измеренную
-`P` или `PR` pose, затем target rail открывается, wrist возвращается в
+Для quarter turn выбранный захват движется из `frame_perpendicular` в измеренную
+`P` или `PR` pose, затем соответствующий rail открывается, захват возвращается в
 perpendicular без движения cube и rail снова закрывается. Для half turn tool
 сначала открывает target rail, regrip-ится в `P`, закрывает rail и выполняет
-измеренный `P → PR` transition; затем тем же release/regrip возвращает wrist
+измеренный `P → PR` transition; затем тем же release/regrip возвращает захват
 в perpendicular. `F/B` используют временный разворот всего cube и обратный
 разворот до завершения команды.
 
@@ -2573,3 +2573,96 @@ Cross-build собирает hardware daemon с `cvi-camera,pca9685`; его о�
 `recover`, `grip`, `scan` из web UI и сравнить status/artifacts с прежним
 `rubik-full-scan`. После этого логичный следующий software milestone — `Solve`
 в daemon; WebSocket можно делать параллельно как улучшение UX.
+
+#### Stateful `Solve` в Duo daemon
+
+После физической проверки `StartScan` команда `Solve` добавлена в тот же
+authoritative `RobotService`. Admission требует одновременно:
+
+- controller `Ready` и отсутствие другой operation;
+- текущую cube session с совпадающим `session_id`;
+- `ScanStatus::Valid` с совпадающим `scan_revision`;
+- stand в `CanonicalGrip`.
+
+Сохранённые physical sticker colors восстанавливаются из шести
+`RecognizedFace`, центры снова задают mapping цветов на `URFDLB`, после чего
+полученный facelet передаётся в `min2phase` с limit 21 move. Решение парсится в
+bounded protocol array из `CubeMove`; строковый solver notation внутрь wire
+protocol не попадает.
+
+Поиск выполняется в отдельном worker thread. UART event loop сразу возвращает
+accepted operation, публикует `SolutionStateKind::Solving` и продолжает
+обслуживать `GetStatus`/`Abort`. После успешного результата snapshot получает
+новый `solution_id`, исходный `scan_revision`, список ходов и состояние
+`Ready`. Solver error публикуется как recoverable `OperationFailed` и не меняет
+механическую позу или scan. `Abort` удаляет receiver активной solver job и
+инвалидирует session по общей emergency policy; поздний результат worker больше
+не может попасть в robot state.
+
+`Solve` не обращается к PCA9685. Unit test отдельно фиксирует, что количество
+PWM writes до и после решения одинаково. Также покрыты stale scan revision и
+abort до завершения worker.
+
+Проверка через web UI после успешного scan:
+
+```text
+Scan status: Valid, revision N
+POST /api/solve с session_id и revision N
+Solution status: Solving → Ready, id M, moves K
+Stand: CanonicalGrip без движения
+```
+
+Следующий milestone — `Execute`: deadline-driven выполнение сохранённых ходов
+с проверкой тройки `session_id + scan_revision + solution_id`, возвратом в
+canonical grip после каждого logical move и normal open после последнего.
+
+#### Stateful `Execute` в Duo daemon
+
+`Execute` принимает только решение, связанное с текущими `session_id`,
+`scan_revision` и `solution_id`. Дополнительно требуются controller `Ready`,
+`SolutionStatus::Ready` и механическая поза `CanonicalGrip`. Любой stale ID или
+параллельная operation отклоняются до первого PWM write.
+
+Сохранённые protocol moves преобразуются в deadline-driven mechanical plan на
+основе тех же primitives, которые физически проверялись через
+`rubik-move-probe`:
+
+- `L/R/U/D` используют соответствующие физические захват и rail;
+- quarter turn переводит удерживающий захват из perpendicular в нужный parallel
+  endpoint, затем открывает его rail, возвращает захват в perpendicular и снова
+  закрывает rail;
+- half turn сначала делает открытый перехват в parallel, закрывает rail и
+  выполняет проверенный переход `parallel → parallel-reversed`, после чего так
+  же возвращается в perpendicular;
+- для `F/B` выполняется проверенный разворот всего кубика: logical F оказывается
+  у physical right, B — у physical left; после физического хода обратный
+  разворот возвращает исходный Front к камере.
+
+После каждого logical move в status увеличивается `completed_moves`, а stand
+снова публикуется как `CanonicalGrip`. Поэтому следующий ход никогда не
+начинается из промежуточной regrip-позы. После последнего хода daemon выполняет
+normal open: сначала left/right rails, затем top/bottom, после чего `all_off`.
+Успешное завершение публикует stand `Open`, заканчивает cube session и очищает
+scan/solution, поскольку физический куб больше не находится под custody робота.
+
+Unit tests проверяют точную PWM sequence для `R`, отдельную структуру полного
+плана `F2`, stale solution ID и окончание session. Дополнительный model test
+строит все 18 вариантов `6 faces × clockwise/counter-clockwise/half` и после
+каждого атомарного шага проверяет два механических инварианта:
+
+1. два соседних захвата не находятся одновременно в parallel-позициях при
+   закрытых rails;
+2. граница каждого logical move имеет все rails в grip и все захваты в
+   perpendicular.
+
+Проверка на стенде после deploy нового `rubik-robotd`:
+
+```text
+Recover → Grip → Scan → Solve → Execute
+```
+
+Во время Execute web status должен показывать `Executing` и рост
+`completed_moves`. После окончания куб решён, stand открыт, session/scan/solution
+отсутствуют. Следующий milestone — объединить уже реализованные операции в
+`ScanSolveExecute`; отдельно остаются command `Open` и event WebSocket для более
+плавного UI.

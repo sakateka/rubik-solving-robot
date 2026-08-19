@@ -560,7 +560,7 @@ where
     }
 
     /// Turns one physically accessible face, then releases and regrips that
-    /// wrist in perpendicular orientation so the next probe starts canonical.
+    /// gripper in perpendicular orientation so the next probe starts canonical.
     fn direct_face_turn(&mut self, face: PhysicalTurnFace, turn: MoveTurn) -> Result<()> {
         let (gripper, rail) = physical_turn_axes(face);
         match turn {
@@ -1167,7 +1167,7 @@ mod tests {
     }
 
     #[test]
-    fn front_probe_move_uses_right_wrist_and_returns_to_canonical_grip() {
+    fn front_probe_move_uses_right_gripper_and_returns_to_canonical_grip() {
         let mut runtime = initialized_runtime(MockOutput::default());
         runtime.grip().unwrap();
 

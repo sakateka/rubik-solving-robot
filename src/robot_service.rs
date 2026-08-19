@@ -6,15 +6,19 @@
 //! deadlines are pending.
 
 use crate::{
-    cube::{CubeState, Face, LogicalFace, QuarterTurns, ScanPose},
+    cube::{
+        parse_solution, solve_facelets, CubeMove, CubeState, Face, LogicalFace, MoveTurn,
+        QuarterTurns, ScanPose,
+    },
     pca9685::PwmOutput,
     robot_link::{FrameEncodeError, ReceivedPacket, UartFrameEncoder},
     stand::{GripperOrientation, RailPosition, StandAxis, StandCalibration},
 };
 use rubik_link_protocol as link;
-use std::{collections::VecDeque, time::Instant};
+use std::{collections::VecDeque, sync::mpsc, time::Instant};
 
 const REQUEST_CACHE_CAPACITY: usize = 16;
+const SOLVER_MAX_MOVES: u8 = 21;
 
 pub trait FaceScanner {
     fn available(&self) -> bool {
@@ -191,25 +195,46 @@ enum RailPair {
 }
 
 #[derive(Clone, Debug)]
-enum ScanStep {
-    SetRails(RailPair, RailPosition),
-    SetGrippers(Vec<(StandAxis, GripperOrientation)>),
-    Capture(link::CubeFace),
+enum RailTarget {
+    Pair(RailPair),
+    Single(StandAxis),
 }
 
 #[derive(Clone, Debug)]
-enum PendingScanStep {
-    Rails(RailPair, RailPosition),
+enum MotionStep {
+    SetRails(RailTarget, RailPosition),
+    SetGrippers(Vec<(StandAxis, GripperOrientation)>),
+    Capture(link::CubeFace),
+    MoveCompleted,
+    AllOff,
+}
+
+#[derive(Clone, Debug)]
+enum PendingMotionStep {
+    Rails(RailTarget, RailPosition),
     Grippers(Vec<(StandAxis, GripperOrientation)>),
 }
 
 struct ActiveScan {
     operation_id: u32,
-    steps: VecDeque<ScanStep>,
-    pending: Option<PendingScanStep>,
+    steps: VecDeque<MotionStep>,
+    pending: Option<PendingMotionStep>,
     deadline: Option<Instant>,
     cube: CubeState,
     failure: Option<link::OperationFailureKind>,
+}
+
+struct ActiveSolve {
+    operation_id: u32,
+    scan_revision: u32,
+    receiver: mpsc::Receiver<Result<Vec<CubeMove>, String>>,
+}
+
+struct ActiveExecute {
+    operation_id: u32,
+    steps: VecDeque<MotionStep>,
+    pending: Option<PendingMotionStep>,
+    deadline: Option<Instant>,
 }
 
 pub struct RobotService<D, S = UnavailableScanner> {
@@ -218,10 +243,13 @@ pub struct RobotService<D, S = UnavailableScanner> {
     status: link::StatusSnapshot,
     active_motion: Option<ActiveMotion>,
     active_scan: Option<ActiveScan>,
+    active_solve: Option<ActiveSolve>,
+    active_execute: Option<ActiveExecute>,
     scanner: S,
     next_operation_id: u32,
     next_session_id: u32,
     next_scan_revision: u32,
+    next_solution_id: u32,
     request_cache: VecDeque<CachedResponse>,
     events: VecDeque<EventMessage>,
 }
@@ -247,10 +275,13 @@ where
             status: unknown_status(),
             active_motion: None,
             active_scan: None,
+            active_solve: None,
+            active_execute: None,
             scanner,
             next_operation_id: 1,
             next_session_id: 1,
             next_scan_revision: 1,
+            next_solution_id: 1,
             request_cache: VecDeque::with_capacity(REQUEST_CACHE_CAPACITY),
             events: VecDeque::new(),
         }
@@ -293,6 +324,8 @@ where
             }
         }
         self.advance_scan(now);
+        self.advance_solve();
+        self.advance_execute(now);
         self.drain_events().map(ServiceMessage::Event).collect()
     }
 
@@ -334,6 +367,8 @@ where
                 self.start_empty_payload_operation(packet, now, link::OperationKind::Grip)
             }
             link::RequestOpcode::StartScan => self.start_scan_request(packet, now),
+            link::RequestOpcode::Solve => self.start_solve_request(packet),
+            link::RequestOpcode::Execute => self.start_execute_request(packet),
             link::RequestOpcode::Abort => {
                 if !packet.payload().is_empty() {
                     return self.rejected(packet.request_id, link::RejectionReason::InvalidPayload);
@@ -353,7 +388,7 @@ where
         if !self.scanner.available() {
             return self.rejected(packet.request_id, link::RejectionReason::UnsupportedCommand);
         }
-        if self.active_motion.is_some() || self.active_scan.is_some() {
+        if self.operation_active() {
             return self.rejected(
                 packet.request_id,
                 link::RejectionReason::OperationAlreadyActive,
@@ -415,6 +450,170 @@ where
         self.accepted(packet.request_id, Some(operation_id))
     }
 
+    fn start_solve_request(&mut self, packet: &ReceivedPacket) -> ResponseMessage {
+        let Ok(command) = link::decode_payload::<link::SolveCommand>(packet.payload()) else {
+            return self.rejected(packet.request_id, link::RejectionReason::InvalidPayload);
+        };
+        if self.operation_active() {
+            return self.rejected(
+                packet.request_id,
+                link::RejectionReason::OperationAlreadyActive,
+            );
+        }
+        if self.status.controller != link::ControllerState::Ready {
+            return self.rejected(
+                packet.request_id,
+                link::RejectionReason::InvalidControllerState,
+            );
+        }
+        let Some(session) = self.status.cube_session else {
+            return self.rejected(packet.request_id, link::RejectionReason::SessionUnavailable);
+        };
+        if session.id != command.session_id {
+            return self.rejected(packet.request_id, link::RejectionReason::SessionMismatch);
+        }
+        if self.status.scan.state != link::ScanStateKind::Valid {
+            return self.rejected(packet.request_id, link::RejectionReason::ScanUnavailable);
+        }
+        if self.status.scan.revision != Some(command.scan_revision) {
+            return self.rejected(
+                packet.request_id,
+                link::RejectionReason::ScanRevisionMismatch,
+            );
+        }
+        if self.status.stand.pose.kind != link::StandPoseKind::CanonicalGrip {
+            return self.rejected(packet.request_id, link::RejectionReason::StandPoseMismatch);
+        }
+
+        let facelets = match cube_from_scan(&self.status.scan)
+            .and_then(|cube| cube.facelet_string())
+        {
+            Ok(facelets) => facelets,
+            Err(error) => {
+                let _ = error;
+                return self.rejected(packet.request_id, link::RejectionReason::ScanUnavailable);
+            }
+        };
+        let operation_id = self.next_operation_id;
+        self.next_operation_id = self.next_operation_id.wrapping_add(1).max(1);
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = solve_facelets(&facelets, SOLVER_MAX_MOVES)
+                .and_then(|solution| parse_solution(&solution))
+                .map_err(|error| format!("{error:#}"));
+            let _ = sender.send(result);
+        });
+
+        let operation = link::OperationStatus {
+            id: operation_id,
+            kind: link::OperationKind::Solve,
+            current_action: 0,
+            action_count: 1,
+        };
+        self.status.controller = link::ControllerState::Busy;
+        self.status.active_operation = Some(operation);
+        self.status.solution = empty_solution();
+        self.status.solution.state = link::SolutionStateKind::Solving;
+        self.status.solution.source_scan_revision = Some(command.scan_revision);
+        self.active_solve = Some(ActiveSolve {
+            operation_id,
+            scan_revision: command.scan_revision,
+            receiver,
+        });
+        self.events
+            .push_back(EventMessage::RobotStateChanged(link::RobotStateChanged {
+                controller: self.status.controller,
+                active_operation: self.status.active_operation,
+            }));
+        self.accepted(packet.request_id, Some(operation_id))
+    }
+
+    fn start_execute_request(&mut self, packet: &ReceivedPacket) -> ResponseMessage {
+        let Ok(command) = link::decode_payload::<link::ExecuteCommand>(packet.payload()) else {
+            return self.rejected(packet.request_id, link::RejectionReason::InvalidPayload);
+        };
+        if self.operation_active() {
+            return self.rejected(
+                packet.request_id,
+                link::RejectionReason::OperationAlreadyActive,
+            );
+        }
+        if self.status.controller != link::ControllerState::Ready {
+            return self.rejected(
+                packet.request_id,
+                link::RejectionReason::InvalidControllerState,
+            );
+        }
+        let Some(session) = self.status.cube_session else {
+            return self.rejected(packet.request_id, link::RejectionReason::SessionUnavailable);
+        };
+        if session.id != command.session_id {
+            return self.rejected(packet.request_id, link::RejectionReason::SessionMismatch);
+        }
+        if self.status.scan.state != link::ScanStateKind::Valid {
+            return self.rejected(packet.request_id, link::RejectionReason::ScanUnavailable);
+        }
+        if self.status.scan.revision != Some(command.scan_revision) {
+            return self.rejected(
+                packet.request_id,
+                link::RejectionReason::ScanRevisionMismatch,
+            );
+        }
+        if self.status.solution.state != link::SolutionStateKind::Ready {
+            return self.rejected(
+                packet.request_id,
+                link::RejectionReason::SolutionUnavailable,
+            );
+        }
+        if self.status.solution.id != Some(command.solution_id)
+            || self.status.solution.source_scan_revision != Some(command.scan_revision)
+        {
+            return self.rejected(packet.request_id, link::RejectionReason::SolutionMismatch);
+        }
+        if self.status.stand.pose.kind != link::StandPoseKind::CanonicalGrip {
+            return self.rejected(packet.request_id, link::RejectionReason::StandPoseMismatch);
+        }
+
+        let moves = self.status.solution.moves[..usize::from(self.status.solution.move_count)]
+            .iter()
+            .copied()
+            .map(internal_move)
+            .collect::<Vec<_>>();
+        let steps = execute_steps(&moves);
+        let action_count = u16::try_from(steps.len()).expect("execute plan fits u16");
+        let operation_id = self.next_operation_id;
+        self.next_operation_id = self.next_operation_id.wrapping_add(1).max(1);
+        let operation = link::OperationStatus {
+            id: operation_id,
+            kind: link::OperationKind::Execute,
+            current_action: 0,
+            action_count,
+        };
+        self.status.controller = link::ControllerState::Busy;
+        self.status.active_operation = Some(operation);
+        self.status.solution.state = link::SolutionStateKind::Executing;
+        self.status.solution.completed_moves = 0;
+        self.active_execute = Some(ActiveExecute {
+            operation_id,
+            steps,
+            pending: None,
+            deadline: None,
+        });
+        self.events
+            .push_back(EventMessage::RobotStateChanged(link::RobotStateChanged {
+                controller: self.status.controller,
+                active_operation: self.status.active_operation,
+            }));
+        self.accepted(packet.request_id, Some(operation_id))
+    }
+
+    fn operation_active(&self) -> bool {
+        self.active_motion.is_some()
+            || self.active_scan.is_some()
+            || self.active_solve.is_some()
+            || self.active_execute.is_some()
+    }
+
     fn start_empty_payload_operation(
         &mut self,
         packet: &ReceivedPacket,
@@ -436,7 +635,7 @@ where
         kind: link::OperationKind,
         _now: Instant,
     ) -> Result<u32, link::RejectionReason> {
-        if self.active_motion.is_some() || self.active_scan.is_some() {
+        if self.operation_active() {
             return Err(link::RejectionReason::OperationAlreadyActive);
         }
 
@@ -524,8 +723,10 @@ where
 
         if let Some(pending) = scan.pending.take() {
             let result = match pending {
-                PendingScanStep::Rails(pair, position) => self.finish_scan_rails(pair, position),
-                PendingScanStep::Grippers(poses) => {
+                PendingMotionStep::Rails(target, position) => {
+                    self.finish_motion_rails(target, position)
+                }
+                PendingMotionStep::Grippers(poses) => {
                     self.finish_scan_grippers(&poses);
                     Ok(())
                 }
@@ -545,21 +746,22 @@ where
         };
 
         let result = match step {
-            ScanStep::SetRails(pair, position) => {
+            MotionStep::SetRails(target, position) => {
                 self.status.stand.pose = transitional_pose();
-                self.command_scan_rails(pair, position).map(|()| {
-                    scan.pending = Some(PendingScanStep::Rails(pair, position));
-                    scan.deadline = Some(now + self.calibration.rail_duration(position));
-                })
+                self.command_motion_rails(target.clone(), position)
+                    .map(|()| {
+                        scan.pending = Some(PendingMotionStep::Rails(target, position));
+                        scan.deadline = Some(now + self.calibration.rail_duration(position));
+                    })
             }
-            ScanStep::SetGrippers(poses) => {
+            MotionStep::SetGrippers(poses) => {
                 self.status.stand.pose = transitional_pose();
                 self.command_scan_grippers(&poses).map(|()| {
-                    scan.pending = Some(PendingScanStep::Grippers(poses));
+                    scan.pending = Some(PendingMotionStep::Grippers(poses));
                     scan.deadline = Some(now + self.calibration.gripper_pose_duration());
                 })
             }
-            ScanStep::Capture(face) => {
+            MotionStep::Capture(face) => {
                 self.status.stand.pose = link::StandPose {
                     kind: link::StandPoseKind::ScanPose,
                     camera_face: Some(face),
@@ -602,6 +804,9 @@ where
                 self.emit_stand();
                 Ok(())
             }
+            MotionStep::MoveCompleted | MotionStep::AllOff => {
+                Err(anyhow::anyhow!("invalid non-scan action in scan plan"))
+            }
         };
 
         if let Err(error) = result {
@@ -611,20 +816,48 @@ where
         }
     }
 
-    fn command_scan_rails(&mut self, pair: RailPair, position: RailPosition) -> anyhow::Result<()> {
-        let (physical, logical) = rail_pair_axes(pair);
-        self.command_rail_pair(physical, logical[0], logical[1], position)
+    fn command_motion_rails(
+        &mut self,
+        target: RailTarget,
+        position: RailPosition,
+    ) -> anyhow::Result<()> {
+        match target {
+            RailTarget::Pair(pair) => {
+                let (physical, logical) = rail_pair_axes(pair);
+                self.command_rail_pair(physical, logical[0], logical[1], position)
+            }
+            RailTarget::Single(axis) => {
+                self.output
+                    .set_channels(&[(axis.channel(), self.calibration.rail_pulse(position))])?;
+                let rail = &mut self.status.stand.rails[stand_axis_index(axis)];
+                rail.motion = link::AxisMotion::Moving;
+                rail.target = Some(link_rail_position(position));
+                self.status.stand.outputs_enabled = true;
+                Ok(())
+            }
+        }
     }
 
-    fn finish_scan_rails(&mut self, pair: RailPair, position: RailPosition) -> anyhow::Result<()> {
-        let (physical, logical) = rail_pair_axes(pair);
-        self.output
-            .disable_channels(&physical.map(StandAxis::channel))?;
-        let logical_position = match position {
-            RailPosition::FarOpen => link::RailPosition::Open,
-            RailPosition::NearGrip => link::RailPosition::Grip,
-        };
-        self.finish_rails(logical, logical_position);
+    fn finish_motion_rails(
+        &mut self,
+        target: RailTarget,
+        position: RailPosition,
+    ) -> anyhow::Result<()> {
+        match target {
+            RailTarget::Pair(pair) => {
+                let (physical, logical) = rail_pair_axes(pair);
+                self.output
+                    .disable_channels(&physical.map(StandAxis::channel))?;
+                self.finish_rails(logical, link_rail_position(position));
+            }
+            RailTarget::Single(axis) => {
+                self.output.disable_channels(&[axis.channel()])?;
+                let rail = &mut self.status.stand.rails[stand_axis_index(axis)];
+                rail.motion = link::AxisMotion::Stable;
+                rail.current = Some(link_rail_position(position));
+                rail.target = None;
+            }
+        }
         Ok(())
     }
 
@@ -712,6 +945,176 @@ where
                     }))
             }
         }
+    }
+
+    fn advance_solve(&mut self) {
+        let Some(active) = self.active_solve.as_ref() else {
+            return;
+        };
+        let result = match active.receiver.try_recv() {
+            Ok(result) => result,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Err("solver worker disconnected without a result".to_owned())
+            }
+        };
+        let active = self.active_solve.take().expect("active solve exists");
+
+        match result {
+            Ok(moves) => {
+                if moves.len() > link::MAX_SOLUTION_MOVES {
+                    self.finish_solve_failure(active.operation_id);
+                    return;
+                }
+                let solution_id = self.next_solution_id;
+                self.next_solution_id = self.next_solution_id.wrapping_add(1).max(1);
+                let mut solution = empty_solution();
+                solution.state = link::SolutionStateKind::Ready;
+                solution.id = Some(solution_id);
+                solution.source_scan_revision = Some(active.scan_revision);
+                solution.move_count = moves.len() as u8;
+                for (destination, cube_move) in solution.moves.iter_mut().zip(moves) {
+                    *destination = protocol_move(cube_move);
+                }
+                self.status.solution = solution;
+                self.status.controller = link::ControllerState::Ready;
+                self.status.active_operation = None;
+                self.events
+                    .push_back(EventMessage::RobotStateChanged(link::RobotStateChanged {
+                        controller: self.status.controller,
+                        active_operation: None,
+                    }));
+                self.events
+                    .push_back(EventMessage::OperationCompleted(link::OperationCompleted {
+                        operation_id: active.operation_id,
+                        kind: link::OperationKind::Solve,
+                    }));
+            }
+            Err(error) => {
+                let _ = error;
+                self.finish_solve_failure(active.operation_id);
+            }
+        }
+    }
+
+    fn finish_solve_failure(&mut self, operation_id: u32) {
+        self.status.solution = empty_solution();
+        self.status.controller = link::ControllerState::Ready;
+        self.status.active_operation = None;
+        self.events
+            .push_back(EventMessage::RobotStateChanged(link::RobotStateChanged {
+                controller: self.status.controller,
+                active_operation: None,
+            }));
+        self.events
+            .push_back(EventMessage::OperationFailed(link::OperationFailed {
+                operation_id,
+                kind: link::OperationFailureKind::SolverNoSolution,
+            }));
+    }
+
+    fn advance_execute(&mut self, now: Instant) {
+        let Some(mut execute) = self.active_execute.take() else {
+            return;
+        };
+        if execute.deadline.is_some_and(|deadline| now < deadline) {
+            self.active_execute = Some(execute);
+            return;
+        }
+
+        if let Some(pending) = execute.pending.take() {
+            let result = match pending {
+                PendingMotionStep::Rails(target, position) => {
+                    self.finish_motion_rails(target, position)
+                }
+                PendingMotionStep::Grippers(poses) => {
+                    self.finish_scan_grippers(&poses);
+                    Ok(())
+                }
+            };
+            if let Err(error) = result {
+                self.enter_fault(execute.operation_id, error);
+                return;
+            }
+            execute.deadline = None;
+            self.advance_action_counter();
+            self.emit_stand();
+        }
+
+        let Some(step) = execute.steps.pop_front() else {
+            self.finish_execute_operation(execute.operation_id);
+            return;
+        };
+        let move_pose = link::StandPose {
+            kind: link::StandPoseKind::MovePose,
+            camera_face: Some(link::CubeFace::Front),
+        };
+        let result = match step {
+            MotionStep::SetRails(target, position) => {
+                self.status.stand.pose = move_pose;
+                self.command_motion_rails(target.clone(), position)
+                    .map(|()| {
+                        execute.pending = Some(PendingMotionStep::Rails(target, position));
+                        execute.deadline = Some(now + self.calibration.rail_duration(position));
+                    })
+            }
+            MotionStep::SetGrippers(poses) => {
+                self.status.stand.pose = move_pose;
+                self.command_scan_grippers(&poses).map(|()| {
+                    execute.pending = Some(PendingMotionStep::Grippers(poses));
+                    execute.deadline = Some(now + self.calibration.gripper_pose_duration());
+                })
+            }
+            MotionStep::MoveCompleted => {
+                self.status.solution.completed_moves =
+                    self.status.solution.completed_moves.saturating_add(1);
+                self.status.stand.pose = link::StandPose {
+                    kind: link::StandPoseKind::CanonicalGrip,
+                    camera_face: Some(link::CubeFace::Front),
+                };
+                self.advance_action_counter();
+                self.emit_stand();
+                Ok(())
+            }
+            MotionStep::AllOff => self.output.all_off().map(|()| {
+                self.status.stand.outputs_enabled = false;
+                self.advance_action_counter();
+            }),
+            MotionStep::Capture(_) => Err(anyhow::anyhow!("capture action in execute plan")),
+        };
+
+        if let Err(error) = result {
+            self.enter_fault(execute.operation_id, error);
+        } else {
+            self.active_execute = Some(execute);
+        }
+    }
+
+    fn finish_execute_operation(&mut self, operation_id: u32) {
+        self.status.controller = link::ControllerState::Ready;
+        self.status.active_operation = None;
+        self.status.stand.pose = link::StandPose {
+            kind: link::StandPoseKind::Open,
+            camera_face: None,
+        };
+        self.status.stand.outputs_enabled = false;
+        self.status.cube_session = None;
+        self.clear_scan_and_solution();
+        self.events
+            .push_back(EventMessage::RobotStateChanged(link::RobotStateChanged {
+                controller: self.status.controller,
+                active_operation: None,
+            }));
+        self.emit_stand();
+        self.events
+            .push_back(EventMessage::CubeSessionChanged(link::CubeSessionChanged {
+                session: None,
+            }));
+        self.events
+            .push_back(EventMessage::OperationCompleted(link::OperationCompleted {
+                operation_id,
+                kind: link::OperationKind::Execute,
+            }));
     }
 
     fn recover_start(&mut self, now: Instant) -> anyhow::Result<()> {
@@ -957,6 +1360,8 @@ where
             Ok(()) => {
                 self.active_motion = None;
                 self.active_scan = None;
+                self.active_solve = None;
+                self.active_execute = None;
                 self.status.controller = link::ControllerState::Aborted;
                 self.status.active_operation = None;
                 self.status.stand = unknown_stand();
@@ -987,6 +1392,8 @@ where
         let _ = self.output.all_off();
         self.active_motion = None;
         self.active_scan = None;
+        self.active_solve = None;
+        self.active_execute = None;
         self.status.controller = link::ControllerState::Faulted;
         self.status.active_operation = None;
         self.status.stand = unknown_stand();
@@ -1095,7 +1502,14 @@ fn link_gripper_orientation(value: GripperOrientation) -> link::GripperOrientati
     }
 }
 
-fn scan_steps() -> VecDeque<ScanStep> {
+fn link_rail_position(value: RailPosition) -> link::RailPosition {
+    match value {
+        RailPosition::FarOpen => link::RailPosition::Open,
+        RailPosition::NearGrip => link::RailPosition::Grip,
+    }
+}
+
+fn scan_steps() -> VecDeque<MotionStep> {
     use GripperOrientation::{
         FrameParallel as P, FrameParallelReversed as R, FramePerpendicular as X,
     };
@@ -1103,33 +1517,33 @@ fn scan_steps() -> VecDeque<ScanStep> {
     use StandAxis::{BottomGripper as B, LeftGripper as L, RightGripper as Rg, TopGripper as T};
 
     VecDeque::from([
-        ScanStep::SetRails(LR, RailPosition::FarOpen),
-        ScanStep::SetGrippers(vec![(T, P), (B, R)]),
-        ScanStep::Capture(link::CubeFace::Left),
-        ScanStep::SetGrippers(vec![(T, X), (B, X)]),
-        ScanStep::SetGrippers(vec![(T, R), (B, P)]),
-        ScanStep::Capture(link::CubeFace::Right),
-        ScanStep::SetGrippers(vec![(T, X), (B, X)]),
-        ScanStep::SetRails(LR, RailPosition::NearGrip),
-        ScanStep::SetRails(TB, RailPosition::FarOpen),
-        ScanStep::SetGrippers(vec![(L, P), (Rg, R)]),
-        ScanStep::Capture(link::CubeFace::Down),
-        ScanStep::SetGrippers(vec![(L, X), (Rg, X)]),
-        ScanStep::SetGrippers(vec![(L, R), (Rg, P)]),
-        ScanStep::Capture(link::CubeFace::Up),
-        ScanStep::SetGrippers(vec![(L, X), (Rg, X)]),
-        ScanStep::SetGrippers(vec![(T, P), (B, R)]),
-        ScanStep::SetRails(TB, RailPosition::NearGrip),
-        ScanStep::SetRails(LR, RailPosition::FarOpen),
-        ScanStep::Capture(link::CubeFace::Front),
-        ScanStep::SetGrippers(vec![(T, R), (B, P)]),
-        ScanStep::Capture(link::CubeFace::Back),
+        MotionStep::SetRails(RailTarget::Pair(LR), RailPosition::FarOpen),
+        MotionStep::SetGrippers(vec![(T, P), (B, R)]),
+        MotionStep::Capture(link::CubeFace::Left),
+        MotionStep::SetGrippers(vec![(T, X), (B, X)]),
+        MotionStep::SetGrippers(vec![(T, R), (B, P)]),
+        MotionStep::Capture(link::CubeFace::Right),
+        MotionStep::SetGrippers(vec![(T, X), (B, X)]),
+        MotionStep::SetRails(RailTarget::Pair(LR), RailPosition::NearGrip),
+        MotionStep::SetRails(RailTarget::Pair(TB), RailPosition::FarOpen),
+        MotionStep::SetGrippers(vec![(L, P), (Rg, R)]),
+        MotionStep::Capture(link::CubeFace::Down),
+        MotionStep::SetGrippers(vec![(L, X), (Rg, X)]),
+        MotionStep::SetGrippers(vec![(L, R), (Rg, P)]),
+        MotionStep::Capture(link::CubeFace::Up),
+        MotionStep::SetGrippers(vec![(L, X), (Rg, X)]),
+        MotionStep::SetGrippers(vec![(T, P), (B, R)]),
+        MotionStep::SetRails(RailTarget::Pair(TB), RailPosition::NearGrip),
+        MotionStep::SetRails(RailTarget::Pair(LR), RailPosition::FarOpen),
+        MotionStep::Capture(link::CubeFace::Front),
+        MotionStep::SetGrippers(vec![(T, R), (B, P)]),
+        MotionStep::Capture(link::CubeFace::Back),
         // B -> F and collision-safe hand-off back to canonical grip.
-        ScanStep::SetGrippers(vec![(T, P), (B, R)]),
-        ScanStep::SetRails(LR, RailPosition::NearGrip),
-        ScanStep::SetRails(TB, RailPosition::FarOpen),
-        ScanStep::SetGrippers(vec![(T, X), (B, X)]),
-        ScanStep::SetRails(TB, RailPosition::NearGrip),
+        MotionStep::SetGrippers(vec![(T, P), (B, R)]),
+        MotionStep::SetRails(RailTarget::Pair(LR), RailPosition::NearGrip),
+        MotionStep::SetRails(RailTarget::Pair(TB), RailPosition::FarOpen),
+        MotionStep::SetGrippers(vec![(T, X), (B, X)]),
+        MotionStep::SetRails(RailTarget::Pair(TB), RailPosition::NearGrip),
     ])
 }
 
@@ -1150,6 +1564,235 @@ fn record_recognized_face(
         },
         Face::from_symbols(&symbols)?,
     )
+}
+
+fn cube_from_scan(scan: &link::ScanStatus) -> anyhow::Result<CubeState> {
+    let mut cube = CubeState::default();
+    for face in [
+        link::CubeFace::Up,
+        link::CubeFace::Right,
+        link::CubeFace::Front,
+        link::CubeFace::Down,
+        link::CubeFace::Left,
+        link::CubeFace::Back,
+    ] {
+        let recognized = scan.faces[face as usize]
+            .ok_or_else(|| anyhow::anyhow!("scan is missing {:?}", face))?;
+        record_recognized_face(&mut cube, face, recognized)?;
+    }
+    Ok(cube)
+}
+
+fn protocol_move(cube_move: CubeMove) -> link::CubeMove {
+    link::CubeMove {
+        face: match cube_move.face {
+            LogicalFace::Up => link::CubeFace::Up,
+            LogicalFace::Right => link::CubeFace::Right,
+            LogicalFace::Front => link::CubeFace::Front,
+            LogicalFace::Down => link::CubeFace::Down,
+            LogicalFace::Left => link::CubeFace::Left,
+            LogicalFace::Back => link::CubeFace::Back,
+        },
+        turn: match cube_move.turn {
+            MoveTurn::Clockwise => link::TurnAmount::Clockwise,
+            MoveTurn::CounterClockwise => link::TurnAmount::CounterClockwise,
+            MoveTurn::Half => link::TurnAmount::Half,
+        },
+    }
+}
+
+fn internal_move(cube_move: link::CubeMove) -> CubeMove {
+    CubeMove {
+        face: logical_face(cube_move.face),
+        turn: match cube_move.turn {
+            link::TurnAmount::Clockwise => MoveTurn::Clockwise,
+            link::TurnAmount::CounterClockwise => MoveTurn::CounterClockwise,
+            link::TurnAmount::Half => MoveTurn::Half,
+        },
+    }
+}
+
+fn execute_steps(moves: &[CubeMove]) -> VecDeque<MotionStep> {
+    let mut steps = VecDeque::new();
+    for &cube_move in moves {
+        match cube_move.face {
+            LogicalFace::Left => direct_turn_steps(
+                &mut steps,
+                StandAxis::LeftGripper,
+                StandAxis::LeftRail,
+                cube_move.turn,
+            ),
+            LogicalFace::Right => direct_turn_steps(
+                &mut steps,
+                StandAxis::RightGripper,
+                StandAxis::RightRail,
+                cube_move.turn,
+            ),
+            LogicalFace::Up => direct_turn_steps(
+                &mut steps,
+                StandAxis::TopGripper,
+                StandAxis::TopRail,
+                cube_move.turn,
+            ),
+            LogicalFace::Down => direct_turn_steps(
+                &mut steps,
+                StandAxis::BottomGripper,
+                StandAxis::BottomRail,
+                cube_move.turn,
+            ),
+            LogicalFace::Front => {
+                position_front_back_steps(&mut steps);
+                direct_turn_steps(
+                    &mut steps,
+                    StandAxis::RightGripper,
+                    StandAxis::RightRail,
+                    cube_move.turn,
+                );
+                restore_front_steps(&mut steps);
+            }
+            LogicalFace::Back => {
+                position_front_back_steps(&mut steps);
+                direct_turn_steps(
+                    &mut steps,
+                    StandAxis::LeftGripper,
+                    StandAxis::LeftRail,
+                    cube_move.turn,
+                );
+                restore_front_steps(&mut steps);
+            }
+        }
+        steps.push_back(MotionStep::MoveCompleted);
+    }
+    steps.push_back(MotionStep::SetRails(
+        RailTarget::Pair(RailPair::LeftRight),
+        RailPosition::FarOpen,
+    ));
+    steps.push_back(MotionStep::SetRails(
+        RailTarget::Pair(RailPair::TopBottom),
+        RailPosition::FarOpen,
+    ));
+    steps.push_back(MotionStep::AllOff);
+    steps
+}
+
+fn direct_turn_steps(
+    steps: &mut VecDeque<MotionStep>,
+    gripper: StandAxis,
+    rail: StandAxis,
+    turn: MoveTurn,
+) {
+    match turn {
+        MoveTurn::Clockwise => steps.push_back(MotionStep::SetGrippers(vec![(
+            gripper,
+            GripperOrientation::FrameParallelReversed,
+        )])),
+        MoveTurn::CounterClockwise => steps.push_back(MotionStep::SetGrippers(vec![(
+            gripper,
+            GripperOrientation::FrameParallel,
+        )])),
+        MoveTurn::Half => {
+            steps.push_back(MotionStep::SetRails(
+                RailTarget::Single(rail),
+                RailPosition::FarOpen,
+            ));
+            steps.push_back(MotionStep::SetGrippers(vec![(
+                gripper,
+                GripperOrientation::FrameParallel,
+            )]));
+            steps.push_back(MotionStep::SetRails(
+                RailTarget::Single(rail),
+                RailPosition::NearGrip,
+            ));
+            steps.push_back(MotionStep::SetGrippers(vec![(
+                gripper,
+                GripperOrientation::FrameParallelReversed,
+            )]));
+        }
+    }
+    steps.push_back(MotionStep::SetRails(
+        RailTarget::Single(rail),
+        RailPosition::FarOpen,
+    ));
+    steps.push_back(MotionStep::SetGrippers(vec![(
+        gripper,
+        GripperOrientation::FramePerpendicular,
+    )]));
+    steps.push_back(MotionStep::SetRails(
+        RailTarget::Single(rail),
+        RailPosition::NearGrip,
+    ));
+}
+
+fn position_front_back_steps(steps: &mut VecDeque<MotionStep>) {
+    steps.push_back(MotionStep::SetRails(
+        RailTarget::Pair(RailPair::LeftRight),
+        RailPosition::FarOpen,
+    ));
+    steps.push_back(MotionStep::SetGrippers(vec![
+        (StandAxis::TopGripper, GripperOrientation::FrameParallel),
+        (
+            StandAxis::BottomGripper,
+            GripperOrientation::FrameParallelReversed,
+        ),
+    ]));
+    steps.push_back(MotionStep::SetRails(
+        RailTarget::Pair(RailPair::LeftRight),
+        RailPosition::NearGrip,
+    ));
+    steps.push_back(MotionStep::SetRails(
+        RailTarget::Pair(RailPair::TopBottom),
+        RailPosition::FarOpen,
+    ));
+    steps.push_back(MotionStep::SetGrippers(vec![
+        (
+            StandAxis::TopGripper,
+            GripperOrientation::FramePerpendicular,
+        ),
+        (
+            StandAxis::BottomGripper,
+            GripperOrientation::FramePerpendicular,
+        ),
+    ]));
+    steps.push_back(MotionStep::SetRails(
+        RailTarget::Pair(RailPair::TopBottom),
+        RailPosition::NearGrip,
+    ));
+}
+
+fn restore_front_steps(steps: &mut VecDeque<MotionStep>) {
+    steps.push_back(MotionStep::SetRails(
+        RailTarget::Pair(RailPair::LeftRight),
+        RailPosition::FarOpen,
+    ));
+    steps.push_back(MotionStep::SetGrippers(vec![
+        (
+            StandAxis::TopGripper,
+            GripperOrientation::FrameParallelReversed,
+        ),
+        (StandAxis::BottomGripper, GripperOrientation::FrameParallel),
+    ]));
+    steps.push_back(MotionStep::SetRails(
+        RailTarget::Pair(RailPair::LeftRight),
+        RailPosition::NearGrip,
+    ));
+    steps.push_back(MotionStep::SetRails(
+        RailTarget::Pair(RailPair::TopBottom),
+        RailPosition::FarOpen,
+    ));
+    steps.push_back(MotionStep::SetGrippers(vec![
+        (
+            StandAxis::TopGripper,
+            GripperOrientation::FramePerpendicular,
+        ),
+        (
+            StandAxis::BottomGripper,
+            GripperOrientation::FramePerpendicular,
+        ),
+    ]));
+    steps.push_back(MotionStep::SetRails(
+        RailTarget::Pair(RailPair::TopBottom),
+        RailPosition::NearGrip,
+    ));
 }
 
 fn logical_face(face: link::CubeFace) -> LogicalFace {
@@ -1320,6 +1963,38 @@ mod tests {
         packet_with_payload(link::RequestOpcode::StartScan, request_id, payload)
     }
 
+    fn solve_packet(session_id: u32, scan_revision: u32, request_id: u32) -> ReceivedPacket {
+        let mut payload = [0; link::MAX_PAYLOAD_LEN];
+        let payload = link::encode_payload(
+            &link::SolveCommand {
+                session_id,
+                scan_revision,
+            },
+            &mut payload,
+        )
+        .unwrap();
+        packet_with_payload(link::RequestOpcode::Solve, request_id, payload)
+    }
+
+    fn execute_packet(
+        session_id: u32,
+        scan_revision: u32,
+        solution_id: u32,
+        request_id: u32,
+    ) -> ReceivedPacket {
+        let mut payload = [0; link::MAX_PAYLOAD_LEN];
+        let payload = link::encode_payload(
+            &link::ExecuteCommand {
+                session_id,
+                scan_revision,
+                solution_id,
+            },
+            &mut payload,
+        )
+        .unwrap();
+        packet_with_payload(link::RequestOpcode::Execute, request_id, payload)
+    }
+
     struct SolvedScanner;
 
     impl FaceScanner for SolvedScanner {
@@ -1360,6 +2035,30 @@ mod tests {
             service.status().stand.pose.kind,
             link::StandPoseKind::CanonicalGrip
         );
+    }
+
+    fn complete_scan<S: FaceScanner>(service: &mut RobotService<MockOutput, S>, base: Instant) {
+        service.handle_packet(&start_scan_packet(1, 3), base);
+        for step in 0..100 {
+            service.tick(base + std::time::Duration::from_secs(10 + step));
+            if service.status().active_operation.is_none() {
+                break;
+            }
+        }
+    }
+
+    fn install_solution<S: FaceScanner>(
+        service: &mut RobotService<MockOutput, S>,
+        moves: &[link::CubeMove],
+    ) {
+        service.status.scan.state = link::ScanStateKind::Valid;
+        service.status.scan.revision = Some(1);
+        service.status.solution = empty_solution();
+        service.status.solution.state = link::SolutionStateKind::Ready;
+        service.status.solution.id = Some(1);
+        service.status.solution.source_scan_revision = Some(1);
+        service.status.solution.move_count = moves.len() as u8;
+        service.status.solution.moves[..moves.len()].copy_from_slice(moves);
     }
 
     fn accepted_operation(messages: &[ServiceMessage]) -> u32 {
@@ -1627,5 +2326,257 @@ mod tests {
                 ..
             }))
         )));
+    }
+
+    #[test]
+    fn solve_publishes_a_revision_bound_solution_without_moving_the_stand() {
+        let base = Instant::now();
+        let mut service = RobotService::with_scanner(
+            MockOutput::default(),
+            StandCalibration::default(),
+            SolvedScanner,
+        );
+        recover_and_grip(&mut service, base);
+        complete_scan(&mut service, base);
+        let pwm_writes_before_solve = service.output.sets.len();
+
+        let messages = service.handle_packet(&solve_packet(1, 1, 4), base);
+        assert_eq!(accepted_operation(&messages), 4);
+        assert_eq!(
+            service.status().solution.state,
+            link::SolutionStateKind::Solving
+        );
+        for _ in 0..1_000 {
+            service.tick(base);
+            if service.status().active_operation.is_none() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+
+        assert_eq!(service.status().controller, link::ControllerState::Ready);
+        assert_eq!(
+            service.status().solution.state,
+            link::SolutionStateKind::Ready
+        );
+        assert_eq!(service.status().solution.id, Some(1));
+        assert_eq!(service.status().solution.source_scan_revision, Some(1));
+        assert_eq!(service.status().solution.move_count, 0);
+        assert_eq!(service.output.sets.len(), pwm_writes_before_solve);
+        assert_eq!(
+            service.status().stand.pose.kind,
+            link::StandPoseKind::CanonicalGrip
+        );
+    }
+
+    #[test]
+    fn solve_rejects_a_stale_scan_revision() {
+        let base = Instant::now();
+        let mut service = RobotService::with_scanner(
+            MockOutput::default(),
+            StandCalibration::default(),
+            SolvedScanner,
+        );
+        recover_and_grip(&mut service, base);
+        complete_scan(&mut service, base);
+
+        let messages = service.handle_packet(&solve_packet(1, 99, 4), base);
+        assert!(matches!(
+            &messages[0],
+            ServiceMessage::Response(ResponseMessage {
+                payload: ResponsePayload::Rejected(link::CommandRejected {
+                    reason: link::RejectionReason::ScanRevisionMismatch,
+                    ..
+                }),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn abort_cancels_an_in_flight_solver_result() {
+        let base = Instant::now();
+        let mut service = RobotService::with_scanner(
+            MockOutput::default(),
+            StandCalibration::default(),
+            SolvedScanner,
+        );
+        recover_and_grip(&mut service, base);
+        complete_scan(&mut service, base);
+        service.handle_packet(&solve_packet(1, 1, 4), base);
+
+        service.handle_packet(&packet(link::RequestOpcode::Abort, 5), base);
+
+        assert_eq!(service.status().controller, link::ControllerState::Aborted);
+        assert!(service.active_solve.is_none());
+        assert_eq!(
+            service.status().solution.state,
+            link::SolutionStateKind::None
+        );
+    }
+
+    #[test]
+    fn execute_runs_a_saved_move_then_opens_and_ends_the_session() {
+        let base = Instant::now();
+        let mut service = RobotService::with_scanner(
+            MockOutput::default(),
+            StandCalibration::default(),
+            SolvedScanner,
+        );
+        recover_and_grip(&mut service, base);
+        let writes_before_execute = service.output.sets.len();
+        install_solution(
+            &mut service,
+            &[link::CubeMove {
+                face: link::CubeFace::Right,
+                turn: link::TurnAmount::Clockwise,
+            }],
+        );
+
+        let messages = service.handle_packet(&execute_packet(1, 1, 1, 4), base);
+        assert_eq!(accepted_operation(&messages), 3);
+        let mut saw_completed_move_in_canonical_grip = false;
+        for step in 0..100 {
+            service.tick(base + std::time::Duration::from_secs(20 + step));
+            if service.status().solution.completed_moves == 1
+                && service.status().stand.pose.kind == link::StandPoseKind::CanonicalGrip
+            {
+                saw_completed_move_in_canonical_grip = true;
+            }
+            if service.status().active_operation.is_none() {
+                break;
+            }
+        }
+
+        assert!(saw_completed_move_in_canonical_grip);
+        assert_eq!(service.status().controller, link::ControllerState::Ready);
+        assert_eq!(service.status().stand.pose.kind, link::StandPoseKind::Open);
+        assert!(!service.status().stand.outputs_enabled);
+        assert!(service.status().cube_session.is_none());
+        assert_eq!(service.status().scan.state, link::ScanStateKind::None);
+        assert_eq!(
+            service.status().solution.state,
+            link::SolutionStateKind::None
+        );
+        assert_eq!(
+            &service.output.sets[writes_before_execute..],
+            &[
+                vec![(0, 2500)],
+                vec![(7, 2500)],
+                vec![(0, 1500)],
+                vec![(7, 1200)],
+                vec![(5, 2500), (7, 2500)],
+                vec![(4, 2500), (6, 2500)],
+            ]
+        );
+    }
+
+    #[test]
+    fn execute_rejects_a_stale_solution_id() {
+        let base = Instant::now();
+        let mut service = RobotService::with_scanner(
+            MockOutput::default(),
+            StandCalibration::default(),
+            SolvedScanner,
+        );
+        recover_and_grip(&mut service, base);
+        install_solution(&mut service, &[]);
+
+        let messages = service.handle_packet(&execute_packet(1, 1, 99, 4), base);
+        assert!(matches!(
+            &messages[0],
+            ServiceMessage::Response(ResponseMessage {
+                payload: ResponsePayload::Rejected(link::CommandRejected {
+                    reason: link::RejectionReason::SolutionMismatch,
+                    ..
+                }),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn front_half_turn_plan_contains_both_whole_cube_regrips() {
+        let steps = execute_steps(&[CubeMove {
+            face: LogicalFace::Front,
+            turn: MoveTurn::Half,
+        }]);
+
+        // 6 position + 7 half-turn + 6 restore + move marker + 3 normal-open.
+        assert_eq!(steps.len(), 23);
+        assert!(matches!(
+            steps[0],
+            MotionStep::SetRails(RailTarget::Pair(RailPair::LeftRight), RailPosition::FarOpen)
+        ));
+        assert!(matches!(
+            steps[6],
+            MotionStep::SetRails(
+                RailTarget::Single(StandAxis::RightRail),
+                RailPosition::FarOpen
+            )
+        ));
+        assert!(matches!(
+            steps[13],
+            MotionStep::SetRails(RailTarget::Pair(RailPair::LeftRight), RailPosition::FarOpen)
+        ));
+        assert!(matches!(steps[19], MotionStep::MoveCompleted));
+        assert!(matches!(steps[22], MotionStep::AllOff));
+    }
+
+    #[test]
+    fn every_supported_move_plan_preserves_grip_and_collision_invariants() {
+        for face in LogicalFace::ALL {
+            for turn in [
+                MoveTurn::Clockwise,
+                MoveTurn::CounterClockwise,
+                MoveTurn::Half,
+            ] {
+                assert_safe_execute_plan(execute_steps(&[CubeMove { face, turn }]));
+            }
+        }
+    }
+
+    fn assert_safe_execute_plan(steps: VecDeque<MotionStep>) {
+        let mut rails = [RailPosition::NearGrip; 4];
+        let mut grippers = [GripperOrientation::FramePerpendicular; 4];
+        let mut saw_move_boundary = false;
+        for step in steps {
+            match step {
+                MotionStep::SetRails(target, position) => match target {
+                    RailTarget::Pair(pair) => {
+                        let (_, axes) = rail_pair_axes(pair);
+                        for axis in axes {
+                            rails[axis as usize] = position;
+                        }
+                    }
+                    RailTarget::Single(axis) => rails[stand_axis_index(axis)] = position,
+                },
+                MotionStep::SetGrippers(poses) => {
+                    for (axis, orientation) in poses {
+                        grippers[stand_axis_index(axis)] = orientation;
+                    }
+                }
+                MotionStep::MoveCompleted => {
+                    saw_move_boundary = true;
+                    assert_eq!(rails, [RailPosition::NearGrip; 4]);
+                    assert_eq!(grippers, [GripperOrientation::FramePerpendicular; 4]);
+                }
+                MotionStep::AllOff => {}
+                MotionStep::Capture(_) => panic!("execute plan must not capture"),
+            }
+
+            for (first, second) in [(0, 2), (2, 1), (1, 3), (3, 0)] {
+                let both_gripped = rails[first] == RailPosition::NearGrip
+                    && rails[second] == RailPosition::NearGrip;
+                let both_parallel =
+                    grippers[first].is_frame_parallel() && grippers[second].is_frame_parallel();
+                assert!(
+                    !(both_gripped && both_parallel),
+                    "adjacent grippers {first}/{second} collide"
+                );
+            }
+        }
+        assert!(saw_move_boundary);
+        assert_eq!(rails, [RailPosition::FarOpen; 4]);
     }
 }
