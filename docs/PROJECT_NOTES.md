@@ -2721,6 +2721,45 @@ Simulator test проверяет шесть face events, один общий op
 Recover → Grip → Scan+Solve+Execute
 ```
 
-Следующий независимый слой — WebSocket events: механический и вычислительный
-workflow уже завершён, а WebSocket заменит status polling для плавного
-отображения текущей грани, solver stage и выполненных ходов.
+#### Event-driven web UI на ESP32-C6
+
+C6 отдаёт `GET /api/events` как WebSocket. События Duo больше не выбрасываются
+при разборе network queue: C6 преобразует opcode в компактный JSON notification,
+например `{"sequence":17,"event":"face_scanned"}`. Event payload намеренно не
+дублируется в JavaScript. Notification помечает состояние как изменившееся, а
+браузер запрашивает цельный `/api/status`, где Duo остаётся единственным
+источником истины.
+
+Gateway core публикует events в web observer независимо от того, была operation
+запущена через HTTP или через USB `rubik-robotctl`. Responses по-прежнему
+возвращаются только инициатору request. Это разделение покрыто unit tests, чтобы
+открытая web-морда не замирала при диагностическом запуске команды через USB.
+
+Для burst событий используется `embassy_sync::Signal`, а не FIFO. Если браузер
+медленнее робота, промежуточные notifications coalesce-ятся, но самый новый не
+теряется. Если событие приходит во время status request, UI ставит dirty flag и
+повторяет запрос после завершения текущего — snapshot не может застрять на
+предыдущем состоянии operation.
+
+WebSocket занимает TCP connection надолго, поэтому picoserve запущен с двумя
+connection workers: один держит `/api/events`, второй обслуживает status и
+commands. Возникшую из этого параллельность HTTP RPC C6 сериализует mutex-ом;
+иначе два handler могли бы забрать ответы друг друга из общей bounded response
+queue.
+
+Проверка прошивки на C6-хосте:
+
+```sh
+cd firmware/esp32c6-controller
+cargo check
+cargo run --release
+```
+
+После подключения к Wi-Fi открыть `http://192.168.4.1/`: индикатор должен стать
+`live`, а `recover`, `grip`, scan/solve/execute и automatic workflow должны
+обновлять JSON status без секундного polling. При разрыве WebSocket клиент
+переподключается через секунду и заново читает полный snapshot.
+
+Следующий UI milestone — заменить технический JSON dump структурированным
+dashboard стенда, scan progress и solution progress, не меняя protocol или Duo
+state machine.

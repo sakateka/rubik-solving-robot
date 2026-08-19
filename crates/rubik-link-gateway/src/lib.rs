@@ -315,8 +315,8 @@ impl Gateway {
         self.push_network_packet(bytes)
     }
 
-    /// Feeds bytes returned by Duo. Complete responses/events are queued for
-    /// either USB framing or future BLE delivery.
+    /// Feeds bytes returned by Duo. Responses return only to their requesting
+    /// upstream; events are also published to the network observer.
     pub fn push_duo_byte(&mut self, byte: u8) -> Option<Result<(), GatewayError>> {
         let packet = match self.duo_decoder.push(byte)? {
             Ok(packet) => packet,
@@ -472,10 +472,10 @@ impl Gateway {
                 self.queue_upstream(upstream, packet)
             }
             link::MessageKind::Event => {
-                let Some(upstream) = self.event_upstream else {
-                    return Ok(());
-                };
-                self.queue_upstream(upstream, packet)?;
+                if self.event_upstream == Some(Upstream::Usb) {
+                    self.queue_upstream(Upstream::Usb, packet)?;
+                }
+                self.queue_upstream(Upstream::Network, packet)?;
                 if matches!(
                     link::EventOpcode::try_from(opcode),
                     Ok(link::EventOpcode::OperationCompleted
@@ -571,6 +571,18 @@ mod tests {
         let mut decoded = [0; link::MAX_PACKET_LEN];
         let packet = link::parse_uart_frame(&frame[..len], &mut decoded).unwrap();
         // Tests only inspect the header; avoid returning a borrow into `decoded`.
+        link::Packet {
+            kind: packet.kind,
+            opcode: packet.opcode,
+            request_id: packet.request_id,
+            payload: &[],
+        }
+    }
+
+    fn dequeue_network(gateway: &mut Gateway) -> link::Packet<'static> {
+        let mut bytes = [0; link::MAX_PACKET_LEN];
+        let len = gateway.dequeue_network_packet(&mut bytes).unwrap().unwrap();
+        let packet = link::decode_packet(&bytes[..len]).unwrap();
         link::Packet {
             kind: packet.kind,
             opcode: packet.opcode,
@@ -761,6 +773,64 @@ mod tests {
             .last()
             .unwrap();
         assert_eq!(result, Err(GatewayError::UnmatchedResponseRequestId(1)));
+    }
+
+    #[test]
+    fn unsolicited_duo_event_is_published_to_network_observer() {
+        let mut gateway = Gateway::new();
+        push_duo(
+            &mut gateway,
+            &uart_frame(
+                link::MessageKind::Event,
+                link::EventOpcode::StandStateChanged.into(),
+                0,
+            ),
+        );
+
+        let event = dequeue_network(&mut gateway);
+        assert_eq!(event.kind, link::MessageKind::Event);
+        assert_eq!(
+            event.opcode,
+            u16::from(link::EventOpcode::StandStateChanged)
+        );
+    }
+
+    #[test]
+    fn usb_operation_event_reaches_usb_owner_and_network_observer() {
+        let mut gateway = Gateway::new();
+        push_usb(
+            &mut gateway,
+            &uart_frame(link::MessageKind::Request, 0x0010, 42),
+        );
+        let _ = dequeue_duo(&mut gateway, 0);
+        push_duo(
+            &mut gateway,
+            &uart_frame(
+                link::MessageKind::Response,
+                link::ResponseOpcode::CommandAccepted.into(),
+                42,
+            ),
+        );
+        let mut accepted_frame = [0; link::MAX_UART_FRAME_LEN];
+        gateway
+            .dequeue_usb_frame(&mut accepted_frame)
+            .unwrap()
+            .unwrap();
+        push_duo(
+            &mut gateway,
+            &uart_frame(
+                link::MessageKind::Event,
+                link::EventOpcode::RobotStateChanged.into(),
+                0,
+            ),
+        );
+
+        let mut usb_frame = [0; link::MAX_UART_FRAME_LEN];
+        let usb_len = gateway.dequeue_usb_frame(&mut usb_frame).unwrap().unwrap();
+        let mut decoded = [0; link::MAX_PACKET_LEN];
+        let usb_event = link::parse_uart_frame(&usb_frame[..usb_len], &mut decoded).unwrap();
+        assert_eq!(usb_event.kind, link::MessageKind::Event);
+        assert_eq!(dequeue_network(&mut gateway).kind, link::MessageKind::Event);
     }
 
     #[test]

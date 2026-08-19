@@ -81,9 +81,10 @@ Connect to the configured SSID and open:
 http://192.168.4.1/
 ```
 
-The page polls `GET /api/status` and renders the complete JSON snapshot returned
-by the Duo daemon. The default SSID is `Rubik Robot`; the default password is
-`ChangeMe`.
+The page opens `GET /api/events` as a WebSocket and renders the complete JSON
+snapshot returned by the Duo daemon. A protocol event makes the page refresh
+`GET /api/status`; reconnecting the WebSocket also forces a full refresh. The
+default SSID is `Rubik Robot`; the default password is `ChangeMe`.
 
 The same endpoint can be checked without the UI:
 
@@ -123,8 +124,26 @@ Accepted operations return HTTP `202`, for example:
 ```
 
 Duo admission failures return HTTP `409` and preserve its rejection reason and
-controller state. The current web page exposes these commands as test buttons
-and continues to use status polling until the event WebSocket is available.
+controller state. The web page exposes these commands as test buttons and
+updates their session-bound payloads from the latest event-driven snapshot.
+
+## Event WebSocket
+
+Open `ws://192.168.4.1/api/events` to receive JSON notifications:
+
+```json
+{"sequence":17,"event":"face_scanned"}
+```
+
+Notifications deliberately contain identity, not a second copy of the event
+payload. The browser treats them as invalidation signals and fetches one
+authoritative `/api/status` snapshot. Bursts are coalesced on C6 while retaining
+the latest notification, so a slow browser cannot block UART or robot motion.
+
+Two HTTP connection workers are active: one may remain occupied by the
+WebSocket while the other serves status and command requests. Duo RPCs are
+serialized inside C6 because their responses share one bounded UART response
+queue.
 
 ## Quiet end-to-end check
 
@@ -142,6 +161,5 @@ request caching, deadlines and protocol events remain real.
 
 ## Next milestone
 
-Add a WebSocket event stream and replace status polling in the embedded page.
-Robot decisions and state remain on the Duo; C6 only adapts HTTP/WebSocket
-messages to the existing link protocol.
+Replace the raw JSON status dump with a structured robot dashboard while
+keeping Duo as the only source of truth.

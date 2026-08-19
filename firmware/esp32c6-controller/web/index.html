@@ -58,6 +58,9 @@
     const buttons = [...document.querySelectorAll('[data-command]')];
     let snapshot = null;
     let statusRequest = null;
+    let statusDirty = false;
+    let eventSocket = null;
+    let reconnectTimer = null;
 
     const commandPaths = {
       recover: '/api/recover',
@@ -106,27 +109,57 @@
     }
 
     async function refreshStatus() {
+      statusDirty = true;
       if (statusRequest) return statusRequest;
       statusRequest = (async () => {
-        try {
-          const response = await fetch('/api/status', { cache: 'no-store' });
-          if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
-          snapshot = await response.json();
-          state.textContent = JSON.stringify(snapshot, null, 2);
-          status.textContent = 'online';
-          status.classList.remove('error');
-          updateButtons();
-        } catch (error) {
-          snapshot = null;
-          state.textContent = `Status unavailable: ${error.message}`;
-          status.textContent = 'offline';
-          status.classList.add('error');
-          updateButtons();
-        } finally {
-          statusRequest = null;
+        while (statusDirty) {
+          statusDirty = false;
+          try {
+            const response = await fetch('/api/status', { cache: 'no-store' });
+            if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
+            snapshot = await response.json();
+            state.textContent = JSON.stringify(snapshot, null, 2);
+            status.textContent = eventSocket?.readyState === WebSocket.OPEN ? 'live' : 'online';
+            status.classList.remove('error');
+            updateButtons();
+          } catch (error) {
+            snapshot = null;
+            state.textContent = `Status unavailable: ${error.message}`;
+            status.textContent = 'offline';
+            status.classList.add('error');
+            updateButtons();
+          }
         }
-      })();
+      })().finally(() => { statusRequest = null; });
       return statusRequest;
+    }
+
+    function connectEvents() {
+      clearTimeout(reconnectTimer);
+      const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+      const socket = new WebSocket(`${scheme}://${location.host}/api/events`);
+      eventSocket = socket;
+
+      socket.addEventListener('open', () => {
+        status.textContent = 'live';
+        status.classList.remove('error');
+        refreshStatus();
+      });
+      socket.addEventListener('message', event => {
+        try {
+          const notification = JSON.parse(event.data);
+          if (notification.event) refreshStatus();
+        } catch {
+          socket.close(1003, 'invalid event');
+        }
+      });
+      socket.addEventListener('close', () => {
+        if (eventSocket !== socket) return;
+        status.textContent = snapshot ? 'reconnecting…' : 'offline';
+        status.classList.toggle('error', !snapshot);
+        reconnectTimer = setTimeout(connectEvents, 1000);
+      });
+      socket.addEventListener('error', () => socket.close());
     }
 
     async function sendCommand(command) {
@@ -161,12 +194,8 @@
       button.addEventListener('click', () => sendCommand(button.dataset.command));
     }
 
-    async function pollStatus() {
-      await refreshStatus();
-      setTimeout(pollStatus, 1000);
-    }
-
-    pollStatus();
+    refreshStatus();
+    connectEvents();
   </script>
 </body>
 </html>

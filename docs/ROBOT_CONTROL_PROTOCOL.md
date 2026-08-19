@@ -163,7 +163,15 @@ Incremental events avoid repeatedly transmitting the entire snapshot:
 - `Fault`.
 
 `GetStatus` remains available after reconnect and restores the complete client
-view even if notifications were lost.
+view even if notifications were lost. The C6 web adapter uses events as
+invalidation signals rather than maintaining a second robot-state reducer: it
+coalesces event bursts, retains the latest notification and fetches one complete
+snapshot from Duo.
+
+Responses remain point-to-point and return only to the upstream that issued the
+request. Events are observable by the web adapter regardless of whether the
+operation was started from HTTP or development USB; a USB operation owner also
+receives its event stream through `rubik-robotctl`.
 
 Sticker confidence is transmitted as an integer from 0 to 255. This is enough
 for the web UI to mark uncertain recognition without exposing model-specific
@@ -258,6 +266,12 @@ the browser. The initial API surface is:
 | `POST` | `/api/open` | Release the cube preserving orientation. |
 | `POST` | `/api/abort` | Priority software stop. |
 | `GET` | `/api/events` | WebSocket event stream. |
+
+The WebSocket emits compact JSON notifications such as
+`{"sequence":17,"event":"face_scanned"}`. `sequence` is local to the current
+C6 boot and is diagnostic; it is not a robot operation or protocol request ID.
+The browser refreshes `/api/status` after each notification and after every
+WebSocket reconnect.
 
 `recover`, `grip`, and `abort` have an empty request body. Session-bound
 commands use the same field names as the UART protocol payloads:

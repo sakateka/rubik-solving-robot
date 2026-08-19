@@ -16,7 +16,9 @@ use core::{
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
 use embassy_net::{Ipv4Cidr, Runner, Stack, StackResources, StaticConfigV4};
-use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
+use embassy_sync::{
+    blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, mutex::Mutex, signal::Signal,
+};
 use embassy_time::{Duration, Timer, with_timeout};
 use esp_alloc as _;
 use esp_backtrace as _;
@@ -34,7 +36,10 @@ use esp_radio::wifi::{
     ap::AccessPointConfig,
 };
 use picoserve::{
-    response::{File, IntoResponse, Json, StatusCode},
+    response::{
+        File, IntoResponse, Json, StatusCode, WebSocketUpgrade,
+        ws::{Message, SocketRx, SocketTx, WebSocketCallback},
+    },
     routing::{Router, get, get_service, post},
 };
 use rubik_link_gateway::Gateway;
@@ -51,11 +56,13 @@ esp_bootloader_esp_idf::esp_app_desc!();
 const HTTP_RPC_TIMEOUT: Duration = Duration::from_secs(3);
 const HTTP_REQUEST_ID_START: u32 = 0x8000_0001;
 const HTTP_REQUEST_PAYLOAD_CAPACITY: usize = 64;
-
 static NEXT_HTTP_REQUEST_ID: AtomicU32 = AtomicU32::new(HTTP_REQUEST_ID_START);
+static NEXT_HTTP_EVENT_SEQUENCE: AtomicU32 = AtomicU32::new(1);
 static HTTP_REQUESTS: Channel<CriticalSectionRawMutex, RequestPacket, 1> = Channel::new();
 static HTTP_RESPONSES: Channel<CriticalSectionRawMutex, OwnedPacket, 1> = Channel::new();
 static HTTP_CANCELLATIONS: Channel<CriticalSectionRawMutex, u32, 1> = Channel::new();
+static HTTP_EVENT: Signal<CriticalSectionRawMutex, ApiEvent> = Signal::new();
+static HTTP_RPC_LOCK: Mutex<CriticalSectionRawMutex, ()> = Mutex::new(());
 
 struct RequestPacket {
     bytes: [u8; HEADER_LEN + HTTP_REQUEST_PAYLOAD_CAPACITY + CRC_LEN],
@@ -107,6 +114,50 @@ impl RequestPacket {
 struct OwnedPacket {
     bytes: [u8; MAX_PACKET_LEN],
     len: usize,
+}
+
+#[derive(Clone, Copy, Serialize)]
+struct ApiEvent {
+    sequence: u32,
+    event: &'static str,
+}
+
+struct EventWebSocket;
+
+impl WebSocketCallback for EventWebSocket {
+    async fn run<R: picoserve::io::Read, W: picoserve::io::Write<Error = R::Error>>(
+        self,
+        mut rx: SocketRx<R>,
+        mut tx: SocketTx<W>,
+    ) -> Result<(), W::Error> {
+        tx.send_json(ApiEvent {
+            sequence: 0,
+            event: "connected",
+        })
+        .await?;
+
+        let mut receive_buffer = [0; 64];
+        loop {
+            match rx
+                .next_message(&mut receive_buffer, HTTP_EVENT.wait())
+                .await?
+            {
+                picoserve::futures::Either::Second(event) => tx.send_json(event).await?,
+                picoserve::futures::Either::First(Ok(Message::Ping(data))) => {
+                    tx.send_pong(data).await?
+                }
+                picoserve::futures::Either::First(Ok(Message::Close(_))) => {
+                    return tx.close(None).await;
+                }
+                picoserve::futures::Either::First(Ok(_)) => {}
+                picoserve::futures::Either::First(Err(error)) => {
+                    return tx
+                        .close(Some((error.code(), "invalid websocket message")))
+                        .await;
+                }
+            }
+        }
+    }
 }
 
 impl OwnedPacket {
@@ -243,6 +294,7 @@ async fn http_server(network: Stack<'static>) -> ! {
             )),
         )
         .route("/api/status", get(api_status))
+        .route("/api/events", get(api_events))
         .route("/api/recover", post(api_recover))
         .route("/api/grip", post(api_grip))
         .route("/api/scan", post(api_scan))
@@ -252,20 +304,35 @@ async fn http_server(network: Stack<'static>) -> ! {
         .route("/api/open", post(api_open))
         .route("/api/abort", post(api_abort));
     let server_config = picoserve::Config::const_default().close_connection_after_response();
-    let mut tcp_rx_buffer = [0; 2048];
-    let mut tcp_tx_buffer = [0; 4096];
-    let mut http_buffer = [0; 2048];
+    let mut tcp_rx_buffer_0 = [0; 2048];
+    let mut tcp_tx_buffer_0 = [0; 4096];
+    let mut http_buffer_0 = [0; 2048];
+    let mut tcp_rx_buffer_1 = [0; 2048];
+    let mut tcp_tx_buffer_1 = [0; 4096];
+    let mut http_buffer_1 = [0; 2048];
 
-    picoserve::Server::new(&app, &server_config, &mut http_buffer)
-        .listen_and_serve(
+    let (shutdown, _) = join(
+        picoserve::Server::new(&app, &server_config, &mut http_buffer_0).listen_and_serve(
             0,
             network,
             app_config::HTTP_PORT,
-            &mut tcp_rx_buffer,
-            &mut tcp_tx_buffer,
-        )
-        .await
-        .into_never()
+            &mut tcp_rx_buffer_0,
+            &mut tcp_tx_buffer_0,
+        ),
+        picoserve::Server::new(&app, &server_config, &mut http_buffer_1).listen_and_serve(
+            1,
+            network,
+            app_config::HTTP_PORT,
+            &mut tcp_rx_buffer_1,
+            &mut tcp_tx_buffer_1,
+        ),
+    )
+    .await;
+    shutdown.into_never()
+}
+
+async fn api_events(websocket: WebSocketUpgrade) -> impl IntoResponse {
+    websocket.on_upgrade(EventWebSocket)
 }
 
 #[allow(
@@ -439,6 +506,7 @@ async fn send_http_request(
     request_id: u32,
     request: RequestPacket,
 ) -> Result<OwnedPacket, HttpRpcError> {
+    let _rpc_guard = HTTP_RPC_LOCK.lock().await;
     HTTP_REQUESTS.send(request).await;
     let response = with_timeout(HTTP_RPC_TIMEOUT, async {
         loop {
@@ -555,9 +623,14 @@ async fn gateway_loop(
             let Ok(Some(packet_len)) = gateway.dequeue_network_packet(&mut frame_buffer) else {
                 break;
             };
-            if link::decode_packet(&frame_buffer[..packet_len])
-                .is_ok_and(|packet| packet.kind == link::MessageKind::Event)
-            {
+
+            let Ok(decoded) = link::decode_packet(&frame_buffer[..packet_len]) else {
+                continue;
+            };
+            if decoded.kind == link::MessageKind::Event {
+                if let Some(event) = api_event(decoded.opcode) {
+                    HTTP_EVENT.signal(event);
+                }
                 continue;
             }
             let mut packet = OwnedPacket {
@@ -570,6 +643,26 @@ async fn gateway_loop(
 
         Timer::after_millis(1).await;
     }
+}
+
+fn api_event(opcode: u16) -> Option<ApiEvent> {
+    let event = match link::EventOpcode::try_from(opcode).ok()? {
+        link::EventOpcode::RobotStateChanged => "robot_state_changed",
+        link::EventOpcode::StandStateChanged => "stand_state_changed",
+        link::EventOpcode::FaceScanned => "face_scanned",
+        link::EventOpcode::PlanChanged => "plan_changed",
+        link::EventOpcode::ActionStarted => "action_started",
+        link::EventOpcode::ActionCompleted => "action_completed",
+        link::EventOpcode::OperationCompleted => "operation_completed",
+        link::EventOpcode::Aborted => "aborted",
+        link::EventOpcode::CubeSessionChanged => "cube_session_changed",
+        link::EventOpcode::OperationFailed => "operation_failed",
+        link::EventOpcode::Fault => "fault",
+    };
+    Some(ApiEvent {
+        sequence: NEXT_HTTP_EVENT_SEQUENCE.fetch_add(1, Ordering::Relaxed),
+        event,
+    })
 }
 
 #[embassy_executor::task]
