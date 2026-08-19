@@ -217,6 +217,7 @@ enum PendingMotionStep {
 
 struct ActiveScan {
     operation_id: u32,
+    kind: link::OperationKind,
     steps: VecDeque<MotionStep>,
     pending: Option<PendingMotionStep>,
     deadline: Option<Instant>,
@@ -226,12 +227,14 @@ struct ActiveScan {
 
 struct ActiveSolve {
     operation_id: u32,
+    kind: link::OperationKind,
     scan_revision: u32,
     receiver: mpsc::Receiver<Result<Vec<CubeMove>, String>>,
 }
 
 struct ActiveExecute {
     operation_id: u32,
+    kind: link::OperationKind,
     steps: VecDeque<MotionStep>,
     pending: Option<PendingMotionStep>,
     deadline: Option<Instant>,
@@ -369,6 +372,8 @@ where
             link::RequestOpcode::StartScan => self.start_scan_request(packet, now),
             link::RequestOpcode::Solve => self.start_solve_request(packet),
             link::RequestOpcode::Execute => self.start_execute_request(packet),
+            link::RequestOpcode::ScanSolveExecute => self.start_scan_solve_execute_request(packet),
+            link::RequestOpcode::Open => self.start_open_request(packet),
             link::RequestOpcode::Abort => {
                 if !packet.payload().is_empty() {
                     return self.rejected(packet.request_id, link::RejectionReason::InvalidPayload);
@@ -385,37 +390,53 @@ where
         let Ok(command) = link::decode_payload::<link::StartScanCommand>(packet.payload()) else {
             return self.rejected(packet.request_id, link::RejectionReason::InvalidPayload);
         };
+        self.start_scan_operation(
+            packet.request_id,
+            command.session_id,
+            link::OperationKind::Scan,
+        )
+    }
+
+    fn start_scan_solve_execute_request(&mut self, packet: &ReceivedPacket) -> ResponseMessage {
+        let Ok(command) = link::decode_payload::<link::ScanSolveExecuteCommand>(packet.payload())
+        else {
+            return self.rejected(packet.request_id, link::RejectionReason::InvalidPayload);
+        };
+        self.start_scan_operation(
+            packet.request_id,
+            command.session_id,
+            link::OperationKind::ScanSolveExecute,
+        )
+    }
+
+    fn start_scan_operation(
+        &mut self,
+        request_id: u32,
+        session_id: u32,
+        kind: link::OperationKind,
+    ) -> ResponseMessage {
         if !self.scanner.available() {
-            return self.rejected(packet.request_id, link::RejectionReason::UnsupportedCommand);
+            return self.rejected(request_id, link::RejectionReason::UnsupportedCommand);
         }
         if self.operation_active() {
-            return self.rejected(
-                packet.request_id,
-                link::RejectionReason::OperationAlreadyActive,
-            );
+            return self.rejected(request_id, link::RejectionReason::OperationAlreadyActive);
         }
         if self.status.controller != link::ControllerState::Ready {
-            return self.rejected(
-                packet.request_id,
-                link::RejectionReason::InvalidControllerState,
-            );
+            return self.rejected(request_id, link::RejectionReason::InvalidControllerState);
         }
         let Some(session) = self.status.cube_session else {
-            return self.rejected(packet.request_id, link::RejectionReason::SessionUnavailable);
+            return self.rejected(request_id, link::RejectionReason::SessionUnavailable);
         };
-        if session.id != command.session_id {
-            return self.rejected(packet.request_id, link::RejectionReason::SessionMismatch);
+        if session.id != session_id {
+            return self.rejected(request_id, link::RejectionReason::SessionMismatch);
         }
         if self.status.stand.pose.kind != link::StandPoseKind::CanonicalGrip {
-            return self.rejected(packet.request_id, link::RejectionReason::StandPoseMismatch);
+            return self.rejected(request_id, link::RejectionReason::StandPoseMismatch);
         }
 
         let revision = self.next_scan_revision;
         if self.scanner.begin_scan(revision).is_err() {
-            return self.rejected(
-                packet.request_id,
-                link::RejectionReason::InvalidControllerState,
-            );
+            return self.rejected(request_id, link::RejectionReason::InvalidControllerState);
         }
         self.next_scan_revision = self.next_scan_revision.wrapping_add(1).max(1);
         let operation_id = self.next_operation_id;
@@ -424,7 +445,7 @@ where
         let action_count = u16::try_from(steps.len()).expect("scan plan fits u16");
         let operation = link::OperationStatus {
             id: operation_id,
-            kind: link::OperationKind::Scan,
+            kind,
             current_action: 0,
             action_count,
         };
@@ -436,6 +457,7 @@ where
         self.status.solution = empty_solution();
         self.active_scan = Some(ActiveScan {
             operation_id,
+            kind,
             steps,
             pending: None,
             deadline: None,
@@ -447,7 +469,7 @@ where
                 controller: self.status.controller,
                 active_operation: self.status.active_operation,
             }));
-        self.accepted(packet.request_id, Some(operation_id))
+        self.accepted(request_id, Some(operation_id))
     }
 
     fn start_solve_request(&mut self, packet: &ReceivedPacket) -> ResponseMessage {
@@ -496,14 +518,6 @@ where
         };
         let operation_id = self.next_operation_id;
         self.next_operation_id = self.next_operation_id.wrapping_add(1).max(1);
-        let (sender, receiver) = mpsc::channel();
-        std::thread::spawn(move || {
-            let result = solve_facelets(&facelets, SOLVER_MAX_MOVES)
-                .and_then(|solution| parse_solution(&solution))
-                .map_err(|error| format!("{error:#}"));
-            let _ = sender.send(result);
-        });
-
         let operation = link::OperationStatus {
             id: operation_id,
             kind: link::OperationKind::Solve,
@@ -512,20 +526,43 @@ where
         };
         self.status.controller = link::ControllerState::Busy;
         self.status.active_operation = Some(operation);
-        self.status.solution = empty_solution();
-        self.status.solution.state = link::SolutionStateKind::Solving;
-        self.status.solution.source_scan_revision = Some(command.scan_revision);
-        self.active_solve = Some(ActiveSolve {
+        self.begin_solver(
             operation_id,
-            scan_revision: command.scan_revision,
-            receiver,
-        });
+            command.scan_revision,
+            link::OperationKind::Solve,
+            facelets,
+        );
         self.events
             .push_back(EventMessage::RobotStateChanged(link::RobotStateChanged {
                 controller: self.status.controller,
                 active_operation: self.status.active_operation,
             }));
         self.accepted(packet.request_id, Some(operation_id))
+    }
+
+    fn begin_solver(
+        &mut self,
+        operation_id: u32,
+        scan_revision: u32,
+        kind: link::OperationKind,
+        facelets: String,
+    ) {
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = solve_facelets(&facelets, SOLVER_MAX_MOVES)
+                .and_then(|solution| parse_solution(&solution))
+                .map_err(|error| format!("{error:#}"));
+            let _ = sender.send(result);
+        });
+        self.status.solution = empty_solution();
+        self.status.solution.state = link::SolutionStateKind::Solving;
+        self.status.solution.source_scan_revision = Some(scan_revision);
+        self.active_solve = Some(ActiveSolve {
+            operation_id,
+            kind,
+            scan_revision,
+            receiver,
+        });
     }
 
     fn start_execute_request(&mut self, packet: &ReceivedPacket) -> ResponseMessage {
@@ -595,6 +632,59 @@ where
         self.status.solution.completed_moves = 0;
         self.active_execute = Some(ActiveExecute {
             operation_id,
+            kind: link::OperationKind::Execute,
+            steps,
+            pending: None,
+            deadline: None,
+        });
+        self.events
+            .push_back(EventMessage::RobotStateChanged(link::RobotStateChanged {
+                controller: self.status.controller,
+                active_operation: self.status.active_operation,
+            }));
+        self.accepted(packet.request_id, Some(operation_id))
+    }
+
+    fn start_open_request(&mut self, packet: &ReceivedPacket) -> ResponseMessage {
+        let Ok(command) = link::decode_payload::<link::OpenCommand>(packet.payload()) else {
+            return self.rejected(packet.request_id, link::RejectionReason::InvalidPayload);
+        };
+        if self.operation_active() {
+            return self.rejected(
+                packet.request_id,
+                link::RejectionReason::OperationAlreadyActive,
+            );
+        }
+        if self.status.controller != link::ControllerState::Ready {
+            return self.rejected(
+                packet.request_id,
+                link::RejectionReason::InvalidControllerState,
+            );
+        }
+        let Some(session) = self.status.cube_session else {
+            return self.rejected(packet.request_id, link::RejectionReason::SessionUnavailable);
+        };
+        if session.id != command.session_id {
+            return self.rejected(packet.request_id, link::RejectionReason::SessionMismatch);
+        }
+        if self.status.stand.pose.kind != link::StandPoseKind::CanonicalGrip {
+            return self.rejected(packet.request_id, link::RejectionReason::StandPoseMismatch);
+        }
+
+        let steps = open_steps();
+        let operation_id = self.next_operation_id;
+        self.next_operation_id = self.next_operation_id.wrapping_add(1).max(1);
+        let operation = link::OperationStatus {
+            id: operation_id,
+            kind: link::OperationKind::Open,
+            current_action: 0,
+            action_count: steps.len() as u16,
+        };
+        self.status.controller = link::ControllerState::Busy;
+        self.status.active_operation = Some(operation);
+        self.active_execute = Some(ActiveExecute {
+            operation_id,
+            kind: link::OperationKind::Open,
             steps,
             pending: None,
             deadline: None,
@@ -901,11 +991,15 @@ where
     }
 
     fn finish_scan_operation(&mut self, scan: ActiveScan) {
+        let facelets = if scan.failure.is_none() {
+            scan.cube.facelet_string().ok()
+        } else {
+            None
+        };
         let failure = scan.failure.or_else(|| {
-            scan.cube
-                .facelet_string()
-                .err()
-                .map(|_| link::OperationFailureKind::InvalidFacelet)
+            facelets
+                .is_none()
+                .then_some(link::OperationFailureKind::InvalidFacelet)
         });
         self.status.scan.current_face = None;
         self.status.scan.state = if failure.is_some() {
@@ -920,28 +1014,57 @@ where
             kind: link::StandPoseKind::CanonicalGrip,
             camera_face: Some(link::CubeFace::Front),
         };
-        self.status.controller = link::ControllerState::Ready;
-        self.status.active_operation = None;
         let _ = self.scanner.finish_scan(&self.status.scan);
         self.emit_stand();
-        self.events
-            .push_back(EventMessage::RobotStateChanged(link::RobotStateChanged {
-                controller: self.status.controller,
-                active_operation: None,
-            }));
         match failure {
             Some(kind) => {
+                self.status.controller = link::ControllerState::Ready;
+                self.status.active_operation = None;
+                self.events
+                    .push_back(EventMessage::RobotStateChanged(link::RobotStateChanged {
+                        controller: self.status.controller,
+                        active_operation: None,
+                    }));
                 self.events
                     .push_back(EventMessage::OperationFailed(link::OperationFailed {
                         operation_id: scan.operation_id,
                         kind,
                     }))
             }
+            None if scan.kind == link::OperationKind::ScanSolveExecute => {
+                let revision = self
+                    .status
+                    .scan
+                    .revision
+                    .expect("completed scan has a revision");
+                if let Some(operation) = self.status.active_operation.as_mut() {
+                    operation.current_action = operation.action_count;
+                    operation.action_count = operation.action_count.saturating_add(1);
+                }
+                self.begin_solver(
+                    scan.operation_id,
+                    revision,
+                    scan.kind,
+                    facelets.expect("valid scan has facelets"),
+                );
+                self.events
+                    .push_back(EventMessage::RobotStateChanged(link::RobotStateChanged {
+                        controller: self.status.controller,
+                        active_operation: self.status.active_operation,
+                    }));
+            }
             None => {
+                self.status.controller = link::ControllerState::Ready;
+                self.status.active_operation = None;
+                self.events
+                    .push_back(EventMessage::RobotStateChanged(link::RobotStateChanged {
+                        controller: self.status.controller,
+                        active_operation: None,
+                    }));
                 self.events
                     .push_back(EventMessage::OperationCompleted(link::OperationCompleted {
                         operation_id: scan.operation_id,
-                        kind: link::OperationKind::Scan,
+                        kind: scan.kind,
                     }))
             }
         }
@@ -966,6 +1089,8 @@ where
                     self.finish_solve_failure(active.operation_id);
                     return;
                 }
+                let execute_plan = (active.kind == link::OperationKind::ScanSolveExecute)
+                    .then(|| execute_steps(&moves));
                 let solution_id = self.next_solution_id;
                 self.next_solution_id = self.next_solution_id.wrapping_add(1).max(1);
                 let mut solution = empty_solution();
@@ -973,22 +1098,48 @@ where
                 solution.id = Some(solution_id);
                 solution.source_scan_revision = Some(active.scan_revision);
                 solution.move_count = moves.len() as u8;
-                for (destination, cube_move) in solution.moves.iter_mut().zip(moves) {
+                for (destination, cube_move) in solution.moves.iter_mut().zip(moves.iter().copied())
+                {
                     *destination = protocol_move(cube_move);
                 }
                 self.status.solution = solution;
-                self.status.controller = link::ControllerState::Ready;
-                self.status.active_operation = None;
-                self.events
-                    .push_back(EventMessage::RobotStateChanged(link::RobotStateChanged {
-                        controller: self.status.controller,
-                        active_operation: None,
-                    }));
-                self.events
-                    .push_back(EventMessage::OperationCompleted(link::OperationCompleted {
+                if let Some(steps) = execute_plan {
+                    self.status.solution.state = link::SolutionStateKind::Executing;
+                    self.status.solution.completed_moves = 0;
+                    if let Some(operation) = self.status.active_operation.as_mut() {
+                        operation.current_action = operation.current_action.saturating_add(1);
+                        operation.action_count =
+                            operation.current_action.saturating_add(steps.len() as u16);
+                    }
+                    self.active_execute = Some(ActiveExecute {
                         operation_id: active.operation_id,
-                        kind: link::OperationKind::Solve,
-                    }));
+                        kind: active.kind,
+                        steps,
+                        pending: None,
+                        deadline: None,
+                    });
+                    self.events.push_back(EventMessage::RobotStateChanged(
+                        link::RobotStateChanged {
+                            controller: self.status.controller,
+                            active_operation: self.status.active_operation,
+                        },
+                    ));
+                } else {
+                    self.status.controller = link::ControllerState::Ready;
+                    self.status.active_operation = None;
+                    self.events.push_back(EventMessage::RobotStateChanged(
+                        link::RobotStateChanged {
+                            controller: self.status.controller,
+                            active_operation: None,
+                        },
+                    ));
+                    self.events.push_back(EventMessage::OperationCompleted(
+                        link::OperationCompleted {
+                            operation_id: active.operation_id,
+                            kind: active.kind,
+                        },
+                    ));
+                }
             }
             Err(error) => {
                 let _ = error;
@@ -1042,12 +1193,16 @@ where
         }
 
         let Some(step) = execute.steps.pop_front() else {
-            self.finish_execute_operation(execute.operation_id);
+            self.finish_execute_operation(execute.operation_id, execute.kind);
             return;
         };
-        let move_pose = link::StandPose {
-            kind: link::StandPoseKind::MovePose,
-            camera_face: Some(link::CubeFace::Front),
+        let move_pose = if execute.kind == link::OperationKind::Open {
+            transitional_pose()
+        } else {
+            link::StandPose {
+                kind: link::StandPoseKind::MovePose,
+                camera_face: Some(link::CubeFace::Front),
+            }
         };
         let result = match step {
             MotionStep::SetRails(target, position) => {
@@ -1090,7 +1245,7 @@ where
         }
     }
 
-    fn finish_execute_operation(&mut self, operation_id: u32) {
+    fn finish_execute_operation(&mut self, operation_id: u32, kind: link::OperationKind) {
         self.status.controller = link::ControllerState::Ready;
         self.status.active_operation = None;
         self.status.stand.pose = link::StandPose {
@@ -1113,7 +1268,7 @@ where
         self.events
             .push_back(EventMessage::OperationCompleted(link::OperationCompleted {
                 operation_id,
-                kind: link::OperationKind::Execute,
+                kind,
             }));
     }
 
@@ -1663,16 +1818,16 @@ fn execute_steps(moves: &[CubeMove]) -> VecDeque<MotionStep> {
         }
         steps.push_back(MotionStep::MoveCompleted);
     }
-    steps.push_back(MotionStep::SetRails(
-        RailTarget::Pair(RailPair::LeftRight),
-        RailPosition::FarOpen,
-    ));
-    steps.push_back(MotionStep::SetRails(
-        RailTarget::Pair(RailPair::TopBottom),
-        RailPosition::FarOpen,
-    ));
-    steps.push_back(MotionStep::AllOff);
+    steps.extend(open_steps());
     steps
+}
+
+fn open_steps() -> VecDeque<MotionStep> {
+    VecDeque::from([
+        MotionStep::SetRails(RailTarget::Pair(RailPair::LeftRight), RailPosition::FarOpen),
+        MotionStep::SetRails(RailTarget::Pair(RailPair::TopBottom), RailPosition::FarOpen),
+        MotionStep::AllOff,
+    ])
 }
 
 fn direct_turn_steps(
@@ -1993,6 +2148,21 @@ mod tests {
         )
         .unwrap();
         packet_with_payload(link::RequestOpcode::Execute, request_id, payload)
+    }
+
+    fn automatic_packet(session_id: u32, request_id: u32) -> ReceivedPacket {
+        let mut payload = [0; link::MAX_PAYLOAD_LEN];
+        let payload =
+            link::encode_payload(&link::ScanSolveExecuteCommand { session_id }, &mut payload)
+                .unwrap();
+        packet_with_payload(link::RequestOpcode::ScanSolveExecute, request_id, payload)
+    }
+
+    fn open_packet(session_id: u32, request_id: u32) -> ReceivedPacket {
+        let mut payload = [0; link::MAX_PAYLOAD_LEN];
+        let payload =
+            link::encode_payload(&link::OpenCommand { session_id }, &mut payload).unwrap();
+        packet_with_payload(link::RequestOpcode::Open, request_id, payload)
     }
 
     struct SolvedScanner;
@@ -2578,5 +2748,111 @@ mod tests {
         }
         assert!(saw_move_boundary);
         assert_eq!(rails, [RailPosition::FarOpen; 4]);
+    }
+
+    #[test]
+    fn open_releases_a_held_cube_without_rotating_grippers() {
+        let base = Instant::now();
+        let mut service = RobotService::with_scanner(
+            MockOutput::default(),
+            StandCalibration::default(),
+            SolvedScanner,
+        );
+        recover_and_grip(&mut service, base);
+        let writes_before_open = service.output.sets.len();
+
+        let messages = service.handle_packet(&open_packet(1, 3), base);
+        assert_eq!(accepted_operation(&messages), 3);
+        for step in 0..20 {
+            service.tick(base + std::time::Duration::from_secs(20 + step));
+            if service.status().active_operation.is_none() {
+                break;
+            }
+        }
+
+        assert_eq!(service.status().stand.pose.kind, link::StandPoseKind::Open);
+        assert!(service.status().cube_session.is_none());
+        assert_eq!(
+            &service.output.sets[writes_before_open..],
+            &[vec![(5, 2500), (7, 2500)], vec![(4, 2500), (6, 2500)]]
+        );
+    }
+
+    #[test]
+    fn automatic_workflow_uses_one_operation_and_opens_after_execute() {
+        let base = Instant::now();
+        let mut service = RobotService::with_scanner(
+            MockOutput::default(),
+            StandCalibration::default(),
+            SolvedScanner,
+        );
+        recover_and_grip(&mut service, base);
+
+        let mut messages = service.handle_packet(&automatic_packet(1, 3), base);
+        assert_eq!(accepted_operation(&messages), 3);
+        for step in 0..500 {
+            messages.extend(service.tick(base + std::time::Duration::from_secs(20 + step)));
+            if service.status().active_operation.is_none() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+
+        assert_eq!(service.status().controller, link::ControllerState::Ready);
+        assert_eq!(service.status().stand.pose.kind, link::StandPoseKind::Open);
+        assert!(service.status().cube_session.is_none());
+        let completions = messages
+            .iter()
+            .filter_map(|message| match message {
+                ServiceMessage::Event(EventMessage::OperationCompleted(event)) => Some(*event),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            completions,
+            vec![link::OperationCompleted {
+                operation_id: 3,
+                kind: link::OperationKind::ScanSolveExecute,
+            }]
+        );
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| matches!(
+                    message,
+                    ServiceMessage::Event(EventMessage::FaceScanned(_))
+                ))
+                .count(),
+            6
+        );
+    }
+
+    #[test]
+    fn automatic_scan_failure_keeps_the_session_and_canonical_grip() {
+        let base = Instant::now();
+        let mut service = RobotService::with_scanner(
+            MockOutput::default(),
+            StandCalibration::default(),
+            FailingScanner,
+        );
+        recover_and_grip(&mut service, base);
+        service.handle_packet(&automatic_packet(1, 3), base);
+        for step in 0..100 {
+            service.tick(base + std::time::Duration::from_secs(20 + step));
+            if service.status().active_operation.is_none() {
+                break;
+            }
+        }
+
+        assert_eq!(service.status().controller, link::ControllerState::Ready);
+        assert_eq!(
+            service.status().stand.pose.kind,
+            link::StandPoseKind::CanonicalGrip
+        );
+        assert_eq!(
+            service.status().cube_session,
+            Some(link::CubeSessionStatus { id: 1 })
+        );
+        assert_eq!(service.status().scan.state, link::ScanStateKind::Invalid);
     }
 }

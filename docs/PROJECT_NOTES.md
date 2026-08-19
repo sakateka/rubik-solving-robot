@@ -2666,3 +2666,61 @@ Recover → Grip → Scan → Solve → Execute
 отсутствуют. Следующий milestone — объединить уже реализованные операции в
 `ScanSolveExecute`; отдельно остаются command `Open` и event WebSocket для более
 плавного UI.
+
+#### Normal `Open` и автоматический workflow
+
+Session-bound команда `Open` использует тот же финальный mechanical plan, что и
+успешный Execute. Она разрешена только из `CanonicalGrip` при совпадающем
+`session_id` и выполняет:
+
+```text
+open left/right rails → wait → open top/bottom rails → wait → all_off
+```
+
+Захваты при этом не вращаются: все четыре уже находятся в perpendicular после
+`Grip`, scan recovery или законченного logical move. После `Open` stand имеет
+состояние `Open`, cube session заканчивается, а scan/solution очищаются.
+
+`ScanSolveExecute` связывает три существующие state machine без промежуточного
+открытия и без новых механических primitives:
+
+```text
+canonical grip
+  → scan L/R/D/U/F/B
+  → return Front, keep gripped
+  → min2phase worker
+  → execute parsed moves
+  → normal open
+```
+
+Весь workflow использует один `operation_id` и
+`OperationKind::ScanSolveExecute`. Завершение scan не публикует отдельный
+`OperationCompleted(Scan)`, а запускает solver внутри той же active operation.
+Аналогично solver result сразу превращается в execute plan; только после
+`all_off` публикуется единственный финальный completion event.
+
+Во время scan статус содержит текущую грань и face mask; во время solver —
+`SolutionStateKind::Solving`; после получения решения — `Executing` и счётчик
+`completed_moves`. `GetStatus` и `Abort` доступны на каждой стадии.
+
+Failure policy остаётся разделённой:
+
+- ошибка recognition/facelet или solver — recoverable: куб возвращён Front к
+  камере, остаётся захваченным в `CanonicalGrip`, session сохраняется;
+- ошибка I²C/motion — fatal: outputs выключаются, поза и session становятся
+  недостоверными, требуется `RecoverToOpen`;
+- успешный workflow решает куб, открывает stand и заканчивает session.
+
+Simulator test проверяет шесть face events, один общий operation ID и один
+финальный completion. Отдельные тесты покрывают scan failure в автоматическом
+режиме и Open без единого gripper PWM write.
+
+После deploy новый полный пользовательский сценарий доступен одной кнопкой:
+
+```text
+Recover → Grip → Scan+Solve+Execute
+```
+
+Следующий независимый слой — WebSocket events: механический и вычислительный
+workflow уже завершён, а WebSocket заменит status polling для плавного
+отображения текущей грани, solver stage и выполненных ходов.
