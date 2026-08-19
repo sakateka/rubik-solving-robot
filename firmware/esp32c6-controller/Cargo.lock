@@ -1064,6 +1064,7 @@ dependencies = [
  "esp-println",
  "esp-radio",
  "esp-rtos",
+ "heapless 0.8.0",
  "log",
  "picoserve",
  "rubik-link-gateway",

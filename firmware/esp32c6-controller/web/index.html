@@ -49,7 +49,7 @@
     th { color: var(--muted); font-size: .72rem; letter-spacing: .08em; text-transform: uppercase; }
     tr:last-child td { border-bottom: 0; }
     .state-pill { display: inline-block; padding: .18rem .4rem; border-radius: .3rem; background: #222c32; font: .75rem ui-monospace, monospace; }
-    .cube-net { display: grid; grid-template: ". u . ." auto "l f r b" auto ". d . ." auto / repeat(4, minmax(3.6rem, 1fr)); gap: .45rem; width: min(100%, 35rem); margin: 0 auto; }
+    .cube-net { display: grid; grid-template-columns: repeat(4, minmax(3.6rem, 1fr)); grid-template-areas: ". u . ." "l f r b" ". d . ."; gap: .45rem; width: min(100%, 35rem); margin: 0 auto; }
     .face { min-width: 0; padding: .35rem; border: 1px solid var(--line); border-radius: .45rem; background: #0e1316; }
     .face[data-face="U"] { grid-area: u; }
     .face[data-face="R"] { grid-area: r; }
@@ -64,6 +64,17 @@
     .chip { padding: .3rem .48rem; border: 1px solid var(--line); border-radius: .35rem; background: #20292f; font: .78rem ui-monospace, monospace; }
     .empty { color: var(--muted); font-size: .82rem; }
     .button-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .5rem; }
+    .move-dialog { width: min(31rem, calc(100% - 1rem)); padding: 0; border: 1px solid var(--line); border-radius: .9rem; background: var(--panel); color: var(--text); box-shadow: 0 1.5rem 5rem #000b; }
+    .move-dialog::backdrop { background: #050709c9; backdrop-filter: blur(3px); }
+    .move-dialog-inner { padding: 1rem; }
+    .move-dialog header { padding: 0 0 .85rem; }
+    .move-dialog h2 { margin: 0; }
+    .move-pad { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .35rem; }
+    .move-pad button { min-height: 2.25rem; font: 700 .9rem ui-monospace, monospace; }
+    .move-sequence { width: 100%; margin-top: .75rem; padding: .7rem .75rem; border: 1px solid #46515a; border-radius: .5rem; outline: none; background: #0e1316; color: var(--text); font: .9rem ui-monospace, monospace; }
+    .move-sequence:focus { border-color: #72a88a; box-shadow: 0 0 0 2px #39765355; }
+    .move-actions { display: grid; grid-template-columns: 1fr 1fr 1.5fr; gap: .4rem; margin-top: .5rem; }
+    .move-meta { min-height: 1.2rem; margin: .45rem 0 0; color: var(--muted); font: .72rem ui-monospace, monospace; }
     button { min-height: 2.65rem; padding: .55rem .65rem; border: 1px solid #46515a; border-radius: .5rem; background: #222c32; color: var(--text); font: inherit; font-size: .8rem; font-weight: 600; cursor: pointer; }
     button:hover:not(:disabled) { background: #2d3941; border-color: #72808b; }
     button:disabled { cursor: not-allowed; opacity: .35; }
@@ -74,7 +85,10 @@
     pre { max-height: 14rem; margin: 0; padding: .8rem; overflow: auto; border-radius: .6rem; background: #090c0e; color: #c8d1d7; font-size: .72rem; line-height: 1.4; }
     @media (max-width: 760px) {
       .workspace { grid-template-columns: 1fr; }
-      .overview { grid-template-columns: 1fr; }
+      .overview { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .overview .submetric { display: none; }
+      .overview .card { padding: .65rem; }
+      .overview .metric { font-size: .82rem; }
       .button-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     }
     @media (max-width: 430px) {
@@ -107,6 +121,7 @@
           <button data-command="solve">Solve</button>
           <button data-command="execute">Execute solution</button>
           <button class="primary" data-command="scan-solve-execute">Scan → solve → execute</button>
+          <button id="open-moves" type="button">Custom moves…</button>
           <button data-command="open">Open</button>
           <button class="danger" data-command="abort">ABORT</button>
         </div>
@@ -147,6 +162,27 @@
     </section>
   </main>
 
+  <dialog class="move-dialog" id="move-dialog">
+    <div class="move-dialog-inner">
+      <header><h2>Custom moves</h2><button id="close-moves" type="button">Close</button></header>
+      <div class="move-pad" aria-label="Available cube moves">
+        <button type="button" data-move="U">U</button><button type="button" data-move="U'">U'</button><button type="button" data-move="U2">U2</button>
+        <button type="button" data-move="R">R</button><button type="button" data-move="R'">R'</button><button type="button" data-move="R2">R2</button>
+        <button type="button" data-move="F">F</button><button type="button" data-move="F'">F'</button><button type="button" data-move="F2">F2</button>
+        <button type="button" data-move="D">D</button><button type="button" data-move="D'">D'</button><button type="button" data-move="D2">D2</button>
+        <button type="button" data-move="L">L</button><button type="button" data-move="L'">L'</button><button type="button" data-move="L2">L2</button>
+        <button type="button" data-move="B">B</button><button type="button" data-move="B'">B'</button><button type="button" data-move="B2">B2</button>
+      </div>
+      <input class="move-sequence" id="move-sequence" maxlength="95" spellcheck="false" autocomplete="off" placeholder="U' F B R2" aria-label="Singmaster move sequence">
+      <div class="move-meta" id="move-meta">0/32 moves</div>
+      <div class="move-actions">
+        <button id="undo-move" type="button">Undo</button>
+        <button id="clear-moves" type="button">Clear</button>
+        <button class="primary" data-command="execute-moves">Execute</button>
+      </div>
+    </div>
+  </dialog>
+
   <script>
     const $ = selector => document.querySelector(selector);
     $('#gateway').textContent = `ESP32-C6 · ${location.host}`;
@@ -155,6 +191,8 @@
     const rawState = $('#robot-state');
     const commandResult = $('#command-result');
     const buttons = [...document.querySelectorAll('[data-command]')];
+    const moveDialog = $('#move-dialog');
+    const moveSequence = $('#move-sequence');
     let snapshot = null;
     let statusRequest = null;
     let statusDirty = false;
@@ -180,7 +218,7 @@
     const commandPaths = {
       recover: '/api/recover', grip: '/api/grip', scan: '/api/scan', solve: '/api/solve',
       execute: '/api/execute', 'scan-solve-execute': '/api/scan-solve-execute',
-      open: '/api/open', abort: '/api/abort',
+      'execute-moves': '/api/execute-moves', open: '/api/open', abort: '/api/abort',
     };
 
     function enumName(group, value, fallback = 'Unknown') {
@@ -349,6 +387,37 @@
         const sourceRevision = snapshot?.solution?.source_scan_revision ?? scanRevision;
         return sessionId == null || sourceRevision == null || solutionId == null ? undefined : { session_id: sessionId, scan_revision: sourceRevision, solution_id: solutionId };
       }
+      if (command === 'execute-moves') {
+        const tokens = moveTokens();
+        return sessionId == null || !validMoveTokens(tokens) ? undefined : { session_id: sessionId, sequence: tokens.join(' ') };
+      }
+    }
+
+    function moveTokens() {
+      return moveSequence.value.trim().split(/\s+/).filter(Boolean);
+    }
+
+    function validMoveTokens(tokens) {
+      return tokens.length > 0 && tokens.length <= 32 && tokens.every(token => /^[URFDLB](?:'|2)?$/i.test(token));
+    }
+
+    function updateMoveEditor() {
+      const tokens = moveTokens();
+      const valid = validMoveTokens(tokens);
+      $('#move-meta').textContent = `${tokens.length}/32 moves${tokens.length && !valid ? ' · invalid sequence' : ''}`;
+      $('#move-meta').style.color = tokens.length && !valid ? 'var(--danger)' : '';
+      $('#undo-move').disabled = tokens.length === 0;
+      $('#clear-moves').disabled = moveSequence.value.length === 0;
+      for (const button of document.querySelectorAll('[data-move]')) button.disabled = tokens.length >= 32;
+      updateButtons();
+    }
+
+    function appendMove(move) {
+      const tokens = moveTokens();
+      if (tokens.length >= 32) return;
+      tokens.push(move);
+      moveSequence.value = tokens.join(' ');
+      updateMoveEditor();
     }
 
     function updateButtons() {
@@ -408,7 +477,8 @@
     }
 
     async function sendCommand(command) {
-      if (command !== 'abort' && !confirm(`Send ${command} to the robot?`)) return;
+      const commandLabel = command === 'execute-moves' ? `moves: ${moveTokens().join(' ')}` : command;
+      if (command !== 'abort' && !confirm(`Send ${commandLabel} to the robot?`)) return;
       const payload = payloadFor(command);
       if (payload === undefined) {
         commandResult.textContent = 'Required session, scan revision, or solution ID is unavailable.';
@@ -428,12 +498,28 @@
         try { parsed = JSON.parse(body); } catch { parsed = body; }
         commandResult.textContent = `${response.status} ${response.statusText}\n${JSON.stringify(parsed, null, 2)}`;
         if (!response.ok) throw new Error(`command rejected (${response.status})`);
+        if (command === 'execute-moves') moveDialog.close();
       } catch (error) {
         commandResult.textContent += `\n${error.message}`;
       } finally {
         await refreshStatus();
       }
     }
+
+    $('#open-moves').addEventListener('click', () => { moveDialog.showModal(); moveSequence.focus(); });
+    $('#close-moves').addEventListener('click', () => moveDialog.close());
+    $('#clear-moves').addEventListener('click', () => { moveSequence.value = ''; updateMoveEditor(); });
+    $('#undo-move').addEventListener('click', () => {
+      const tokens = moveTokens();
+      tokens.pop();
+      moveSequence.value = tokens.join(' ');
+      updateMoveEditor();
+    });
+    for (const button of document.querySelectorAll('[data-move]')) button.addEventListener('click', () => appendMove(button.dataset.move));
+    moveSequence.addEventListener('input', updateMoveEditor);
+    moveSequence.addEventListener('keydown', event => {
+      if (event.key === 'Enter' && payloadFor('execute-moves') !== undefined) sendCommand('execute-moves');
+    });
 
     for (const tab of document.querySelectorAll('[data-tab]')) {
       tab.addEventListener('click', () => {
@@ -444,6 +530,7 @@
     for (const button of buttons) button.addEventListener('click', () => sendCommand(button.dataset.command));
     renderStand(null);
     renderFaces(null);
+    updateMoveEditor();
     refreshStatus();
     connectEvents();
   </script>

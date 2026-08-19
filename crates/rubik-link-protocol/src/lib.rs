@@ -9,12 +9,14 @@
 mod cobs;
 mod crc;
 mod message;
+mod notation;
 mod opcode;
 mod payload;
 mod state;
 mod wire;
 
 pub use message::*;
+pub use notation::{parse_singmaster, SingmasterError};
 pub use opcode::{EventOpcode, RequestOpcode, ResponseOpcode};
 pub use payload::{decode_payload, encode_payload, PayloadError};
 pub use state::*;

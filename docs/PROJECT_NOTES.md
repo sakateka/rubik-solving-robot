@@ -2790,3 +2790,31 @@ controls расположены рядом, controller/operation/cube идут �
 `rubik-robotd-sim`, после чего с физическим scan workflow. Визуально нужно
 сверить порядок граней и стикеров, confidence проблемных red/orange detection,
 рост action/move progress и корректное восстановление после WebSocket reconnect.
+
+#### Ручные движения из web UI
+
+`ExecuteMoves` проведён через весь production path: web UI → HTTP на C6 →
+бинарный UART protocol → stateful Duo daemon. HTTP принимает удобную строку
+Singmaster вида `U' F B R2`; shared `no_std` parser в
+`rubik-link-protocol` преобразует 1–32 токена в bounded массив `CubeMove`.
+Допустимы грани `U R F D L B` и суффиксы `'`/`2`. C6 проверяет синтаксис, но
+решение о допустимости движения остаётся за Duo.
+
+В wire payload каждый ход упакован в один байт как `face * 3 + turn`.
+Максимальная команда из 32 ходов занимает 38 байт; благодаря этому не пришлось
+увеличивать общий request buffer и async state всех HTTP handlers на C6.
+
+Duo принимает команду только для текущей cube session, в состоянии `Ready` и
+позе `CanonicalGrip`. Для ручной последовательности используется тот же
+проверенный mechanical planner, что и для solver moves, включая временный
+разворот всего кубика для `F/B`. В отличие от исполнения решения, операция не
+открывает rails и не завершает session: после последнего хода куб остаётся
+захваченным во Front reference, поэтому следующую последовательность можно
+отправить сразу. Первый завершённый ход инвалидирует старые scan и solution,
+поскольку их facelet больше не описывает физический куб.
+
+В dashboard кнопка `Custom moves…` открывает компактную матрицу из всех 18
+ходов (`X`, `X'`, `X2`) по образцу touch-интерфейса cube solver. Нажатия
+собирают редактируемую строку; доступны Undo, Clear и Execute. Сервер повторно
+парсит строку, поэтому ручное редактирование в браузере не обходит protocol
+validation.

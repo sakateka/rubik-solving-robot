@@ -34,6 +34,7 @@ esp-rtos = { version = "0.3.0", features = [
   "log-04",
 ] }
 log = "0.4.27"
+heapless = { version = "0.8.0", features = ["serde"] }
 picoserve = { version = "0.18.0", features = ["embassy", "json", "log", "ws"] }
 rubik-link-gateway = { path = "../../crates/rubik-link-gateway" }
 rubik-link-protocol = { path = "../../crates/rubik-link-protocol" }

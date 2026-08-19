@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{de, ser::SerializeTuple, Deserialize, Deserializer, Serialize, Serializer};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 
 use crate::state::{
@@ -35,11 +35,79 @@ pub struct OpenCommand {
     pub session_id: u32,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ExecuteMovesCommand {
     pub session_id: u32,
     pub moves: [CubeMove; MAX_SOLUTION_MOVES],
     pub move_count: u8,
+}
+
+impl Serialize for ExecuteMovesCommand {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut packed = [0_u8; MAX_SOLUTION_MOVES];
+        for (target, cube_move) in packed.iter_mut().zip(self.moves) {
+            *target = (cube_move.face as u8) * 3 + cube_move.turn as u8;
+        }
+        let mut tuple = serializer.serialize_tuple(3)?;
+        tuple.serialize_element(&self.session_id)?;
+        tuple.serialize_element(&packed)?;
+        tuple.serialize_element(&self.move_count)?;
+        tuple.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for ExecuteMovesCommand {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct WireCommand {
+            session_id: u32,
+            packed: [u8; MAX_SOLUTION_MOVES],
+            move_count: u8,
+        }
+
+        let wire = WireCommand::deserialize(deserializer)?;
+        if usize::from(wire.move_count) > MAX_SOLUTION_MOVES {
+            return Err(de::Error::custom("too many requested moves"));
+        }
+        let empty = CubeMove {
+            face: CubeFace::Up,
+            turn: crate::TurnAmount::Clockwise,
+        };
+        let mut moves = [empty; MAX_SOLUTION_MOVES];
+        for (target, packed) in moves
+            .iter_mut()
+            .zip(wire.packed)
+            .take(usize::from(wire.move_count))
+        {
+            let face = match packed / 3 {
+                0 => CubeFace::Up,
+                1 => CubeFace::Right,
+                2 => CubeFace::Front,
+                3 => CubeFace::Down,
+                4 => CubeFace::Left,
+                5 => CubeFace::Back,
+                _ => return Err(de::Error::custom("invalid packed cube face")),
+            };
+            let turn = match packed % 3 {
+                0 => crate::TurnAmount::Clockwise,
+                1 => crate::TurnAmount::CounterClockwise,
+                2 => crate::TurnAmount::Half,
+                _ => unreachable!(),
+            };
+            *target = CubeMove { face, turn };
+        }
+        Ok(Self {
+            session_id: wire.session_id,
+            moves,
+            move_count: wire.move_count,
+        })
+    }
 }
 
 impl ExecuteMovesCommand {
@@ -314,6 +382,42 @@ mod tests {
             Err(SchemaError::TooManyRequestedMoves(
                 (MAX_SOLUTION_MOVES + 1) as u8
             ))
+        );
+    }
+
+    #[test]
+    fn manual_move_command_packs_all_moves_into_a_small_http_payload() {
+        let mut moves = [CubeMove {
+            face: CubeFace::Up,
+            turn: TurnAmount::Clockwise,
+        }; MAX_SOLUTION_MOVES];
+        for (index, cube_move) in moves.iter_mut().enumerate() {
+            cube_move.face = match index % 6 {
+                0 => CubeFace::Up,
+                1 => CubeFace::Right,
+                2 => CubeFace::Front,
+                3 => CubeFace::Down,
+                4 => CubeFace::Left,
+                _ => CubeFace::Back,
+            };
+            cube_move.turn = match index % 3 {
+                0 => TurnAmount::Clockwise,
+                1 => TurnAmount::CounterClockwise,
+                _ => TurnAmount::Half,
+            };
+        }
+        let command = ExecuteMovesCommand {
+            session_id: u32::MAX,
+            moves,
+            move_count: MAX_SOLUTION_MOVES as u8,
+        };
+        let mut output = [0_u8; 64];
+        let encoded = encode_payload(&command, &mut output).unwrap();
+
+        assert_eq!(encoded.len(), 38);
+        assert_eq!(
+            crate::decode_payload::<ExecuteMovesCommand>(encoded).unwrap(),
+            command
         );
     }
 }

@@ -262,6 +262,7 @@ the browser. The initial API surface is:
 | `POST` | `/api/scan` | Scan all faces. |
 | `POST` | `/api/solve` | Solve the validated facelet. |
 | `POST` | `/api/execute` | Execute the prepared solution. |
+| `POST` | `/api/execute-moves` | Execute a manual Singmaster sequence. |
 | `POST` | `/api/scan-solve-execute` | Run the complete flow. |
 | `POST` | `/api/open` | Release the cube preserving orientation. |
 | `POST` | `/api/abort` | Priority software stop. |
@@ -280,7 +281,16 @@ commands use the same field names as the UART protocol payloads:
 {"session_id": 1}
 {"session_id": 1, "scan_revision": 2}
 {"session_id": 1, "scan_revision": 2, "solution_id": 3}
+{"session_id": 1, "sequence": "U' F B R2"}
 ```
+
+`/api/execute-moves` accepts 1–32 whitespace-separated moves. Each token is a
+face letter `U R F D L B` with an optional prime (`'`) or half-turn (`2`)
+suffix. C6 parses this text into the bounded binary `ExecuteMovesCommand`;
+Duo still performs the authoritative session, pose and controller-state checks.
+On the wire each move is packed as `face * 3 + turn`, so even the maximum
+32-move command occupies 38 payload bytes and fits the existing C6 request
+buffer without increasing every HTTP handler future.
 
 An admitted command returns HTTP `202` with its protocol request and operation
 IDs. A command rejected by Duo returns HTTP `409`; malformed JSON is HTTP `400`,

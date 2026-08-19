@@ -85,7 +85,8 @@ The page opens `GET /api/events` as a WebSocket and renders the complete JSON
 snapshot returned by the Duo daemon as a structured dashboard: controller and
 operation progress, stand axes, one `U / L F R B / D` cube net with sticker
 confidence, solution moves and the mechanical plan. Stand, solution, plan and
-raw data share one tabbed detail panel. A protocol event makes the page refresh
+raw data share one tabbed detail panel. The `Custom moves` dialog provides all
+18 Singmaster moves, an editable sequence and Undo/Clear controls. A protocol event makes the page refresh
 `GET /api/status`; reconnecting the WebSocket also forces a full refresh. The
 default SSID is `Rubik Robot`; the default password is `ChangeMe`.
 
@@ -116,6 +117,7 @@ Session-bound commands accept JSON copied from the current status snapshot:
 curl -X POST -H 'Content-Type: application/json' -d '{"session_id":1}' http://192.168.4.1/api/scan
 curl -X POST -H 'Content-Type: application/json' -d '{"session_id":1,"scan_revision":1}' http://192.168.4.1/api/solve
 curl -X POST -H 'Content-Type: application/json' -d '{"session_id":1,"scan_revision":1,"solution_id":1}' http://192.168.4.1/api/execute
+curl -X POST -H 'Content-Type: application/json' -d "{\"session_id\":1,\"sequence\":\"U' F B R2\"}" http://192.168.4.1/api/execute-moves
 curl -X POST -H 'Content-Type: application/json' -d '{"session_id":1}' http://192.168.4.1/api/scan-solve-execute
 curl -X POST -H 'Content-Type: application/json' -d '{"session_id":1}' http://192.168.4.1/api/open
 ```
@@ -129,6 +131,9 @@ Accepted operations return HTTP `202`, for example:
 Duo admission failures return HTTP `409` and preserve its rejection reason and
 controller state. The web page exposes these commands as test buttons and
 updates their session-bound payloads from the latest event-driven snapshot.
+Manual sequences contain 1–32 whitespace-separated moves and leave the cube
+held in canonical grip, ready for another sequence. The first completed move
+invalidates any scan and prepared solution for that session.
 
 ## Event WebSocket
 

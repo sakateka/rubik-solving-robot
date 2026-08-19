@@ -122,6 +122,21 @@ struct ApiEvent {
     event: &'static str,
 }
 
+mod execute_moves_json {
+    #![allow(
+        clippy::large_stack_frames,
+        reason = "the JSON command owns one bounded 96-byte Singmaster string"
+    )]
+
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    pub(super) struct Request {
+        pub(super) session_id: u32,
+        pub(super) sequence: heapless::String<96>,
+    }
+}
+
 struct EventWebSocket;
 
 impl WebSocketCallback for EventWebSocket {
@@ -300,6 +315,7 @@ async fn http_server(network: Stack<'static>) -> ! {
         .route("/api/scan", post(api_scan))
         .route("/api/solve", post(api_solve))
         .route("/api/execute", post(api_execute))
+        .route("/api/execute-moves", post(api_execute_moves))
         .route("/api/scan-solve-execute", post(api_scan_solve_execute))
         .route("/api/open", post(api_open))
         .route("/api/abort", post(api_abort));
@@ -389,6 +405,56 @@ async fn api_solve(Json(command): Json<link::SolveCommand>) -> ApiCommandRespons
 )]
 async fn api_execute(Json(command): Json<link::ExecuteCommand>) -> ApiCommandResponse {
     send_command(link::RequestOpcode::Execute, &command).await
+}
+
+#[allow(
+    clippy::large_stack_frames,
+    reason = "picoserve stores this HTTP handler future in static task storage"
+)]
+async fn api_execute_moves(Json(command): Json<execute_moves_json::Request>) -> ApiCommandResponse {
+    let request_id = next_http_request_id();
+    let request = match encode_execute_moves_request(request_id, command) {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
+    send_command_request(request_id, request).await
+}
+
+fn encode_execute_moves_request(
+    request_id: u32,
+    command: execute_moves_json::Request,
+) -> Result<RequestPacket, ApiCommandResponse> {
+    let (moves, move_count) = match link::parse_singmaster(&command.sequence) {
+        Ok(parsed) => parsed,
+        Err(link::SingmasterError::Empty) => {
+            return Err(api_command_error(
+                StatusCode::BAD_REQUEST,
+                "move sequence is empty",
+            ));
+        }
+        Err(link::SingmasterError::TooManyMoves) => {
+            return Err(api_command_error(
+                StatusCode::BAD_REQUEST,
+                "move sequence exceeds 32 moves",
+            ));
+        }
+        Err(link::SingmasterError::InvalidToken { .. }) => {
+            return Err(api_command_error(
+                StatusCode::BAD_REQUEST,
+                "invalid Singmaster move",
+            ));
+        }
+    };
+    RequestPacket::with_payload(
+        link::RequestOpcode::ExecuteMoves,
+        request_id,
+        &link::ExecuteMovesCommand {
+            session_id: command.session_id,
+            moves,
+            move_count,
+        },
+    )
+    .map_err(|()| api_command_error(StatusCode::INTERNAL_SERVER_ERROR, "encode request"))
 }
 
 async fn api_scan_solve_execute(

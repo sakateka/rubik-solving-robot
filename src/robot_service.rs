@@ -372,6 +372,7 @@ where
             link::RequestOpcode::StartScan => self.start_scan_request(packet, now),
             link::RequestOpcode::Solve => self.start_solve_request(packet),
             link::RequestOpcode::Execute => self.start_execute_request(packet),
+            link::RequestOpcode::ExecuteMoves => self.start_execute_moves_request(packet),
             link::RequestOpcode::ScanSolveExecute => self.start_scan_solve_execute_request(packet),
             link::RequestOpcode::Open => self.start_open_request(packet),
             link::RequestOpcode::Abort => {
@@ -382,7 +383,6 @@ where
                 self.abort(operation_id);
                 self.accepted(packet.request_id, None)
             }
-            _ => self.rejected(packet.request_id, link::RejectionReason::UnsupportedCommand),
         }
     }
 
@@ -633,6 +633,68 @@ where
         self.active_execute = Some(ActiveExecute {
             operation_id,
             kind: link::OperationKind::Execute,
+            steps,
+            pending: None,
+            deadline: None,
+        });
+        self.events
+            .push_back(EventMessage::RobotStateChanged(link::RobotStateChanged {
+                controller: self.status.controller,
+                active_operation: self.status.active_operation,
+            }));
+        self.accepted(packet.request_id, Some(operation_id))
+    }
+
+    fn start_execute_moves_request(&mut self, packet: &ReceivedPacket) -> ResponseMessage {
+        let Ok(command) = link::decode_payload::<link::ExecuteMovesCommand>(packet.payload())
+        else {
+            return self.rejected(packet.request_id, link::RejectionReason::InvalidPayload);
+        };
+        if command.validate().is_err() || command.move_count == 0 {
+            return self.rejected(packet.request_id, link::RejectionReason::InvalidPayload);
+        }
+        if self.operation_active() {
+            return self.rejected(
+                packet.request_id,
+                link::RejectionReason::OperationAlreadyActive,
+            );
+        }
+        if self.status.controller != link::ControllerState::Ready {
+            return self.rejected(
+                packet.request_id,
+                link::RejectionReason::InvalidControllerState,
+            );
+        }
+        let Some(session) = self.status.cube_session else {
+            return self.rejected(packet.request_id, link::RejectionReason::SessionUnavailable);
+        };
+        if session.id != command.session_id {
+            return self.rejected(packet.request_id, link::RejectionReason::SessionMismatch);
+        }
+        if self.status.stand.pose.kind != link::StandPoseKind::CanonicalGrip {
+            return self.rejected(packet.request_id, link::RejectionReason::StandPoseMismatch);
+        }
+
+        let moves = command.moves[..usize::from(command.move_count)]
+            .iter()
+            .copied()
+            .map(internal_move)
+            .collect::<Vec<_>>();
+        let steps = held_execute_steps(&moves);
+        let action_count = u16::try_from(steps.len()).expect("manual execute plan fits u16");
+        let operation_id = self.next_operation_id;
+        self.next_operation_id = self.next_operation_id.wrapping_add(1).max(1);
+        let operation = link::OperationStatus {
+            id: operation_id,
+            kind: link::OperationKind::ExecuteMoves,
+            current_action: 0,
+            action_count,
+        };
+        self.status.controller = link::ControllerState::Busy;
+        self.status.active_operation = Some(operation);
+        self.active_execute = Some(ActiveExecute {
+            operation_id,
+            kind: link::OperationKind::ExecuteMoves,
             steps,
             pending: None,
             deadline: None,
@@ -1221,8 +1283,12 @@ where
                 })
             }
             MotionStep::MoveCompleted => {
-                self.status.solution.completed_moves =
-                    self.status.solution.completed_moves.saturating_add(1);
+                if execute.kind == link::OperationKind::ExecuteMoves {
+                    self.clear_scan_and_solution();
+                } else {
+                    self.status.solution.completed_moves =
+                        self.status.solution.completed_moves.saturating_add(1);
+                }
                 self.status.stand.pose = link::StandPose {
                     kind: link::StandPoseKind::CanonicalGrip,
                     camera_face: Some(link::CubeFace::Front),
@@ -1248,6 +1314,24 @@ where
     fn finish_execute_operation(&mut self, operation_id: u32, kind: link::OperationKind) {
         self.status.controller = link::ControllerState::Ready;
         self.status.active_operation = None;
+        if kind == link::OperationKind::ExecuteMoves {
+            self.status.stand.pose = link::StandPose {
+                kind: link::StandPoseKind::CanonicalGrip,
+                camera_face: Some(link::CubeFace::Front),
+            };
+            self.events
+                .push_back(EventMessage::RobotStateChanged(link::RobotStateChanged {
+                    controller: self.status.controller,
+                    active_operation: None,
+                }));
+            self.emit_stand();
+            self.events
+                .push_back(EventMessage::OperationCompleted(link::OperationCompleted {
+                    operation_id,
+                    kind,
+                }));
+            return;
+        }
         self.status.stand.pose = link::StandPose {
             kind: link::StandPoseKind::Open,
             camera_face: None,
@@ -1768,6 +1852,12 @@ fn internal_move(cube_move: link::CubeMove) -> CubeMove {
 }
 
 fn execute_steps(moves: &[CubeMove]) -> VecDeque<MotionStep> {
+    let mut steps = held_execute_steps(moves);
+    steps.extend(open_steps());
+    steps
+}
+
+fn held_execute_steps(moves: &[CubeMove]) -> VecDeque<MotionStep> {
     let mut steps = VecDeque::new();
     for &cube_move in moves {
         match cube_move.face {
@@ -1818,7 +1908,6 @@ fn execute_steps(moves: &[CubeMove]) -> VecDeque<MotionStep> {
         }
         steps.push_back(MotionStep::MoveCompleted);
     }
-    steps.extend(open_steps());
     steps
 }
 
@@ -2148,6 +2237,26 @@ mod tests {
         )
         .unwrap();
         packet_with_payload(link::RequestOpcode::Execute, request_id, payload)
+    }
+
+    fn execute_moves_packet(
+        session_id: u32,
+        moves: &[link::CubeMove],
+        request_id: u32,
+    ) -> ReceivedPacket {
+        let empty_move = link::CubeMove {
+            face: link::CubeFace::Up,
+            turn: link::TurnAmount::Clockwise,
+        };
+        let mut command = link::ExecuteMovesCommand {
+            session_id,
+            moves: [empty_move; link::MAX_SOLUTION_MOVES],
+            move_count: moves.len() as u8,
+        };
+        command.moves[..moves.len()].copy_from_slice(moves);
+        let mut payload = [0; link::MAX_PAYLOAD_LEN];
+        let payload = link::encode_payload(&command, &mut payload).unwrap();
+        packet_with_payload(link::RequestOpcode::ExecuteMoves, request_id, payload)
     }
 
     fn automatic_packet(session_id: u32, request_id: u32) -> ReceivedPacket {
@@ -2658,6 +2767,88 @@ mod tests {
             ServiceMessage::Response(ResponseMessage {
                 payload: ResponsePayload::Rejected(link::CommandRejected {
                     reason: link::RejectionReason::SolutionMismatch,
+                    ..
+                }),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn manual_moves_execute_without_opening_or_ending_the_session() {
+        let base = Instant::now();
+        let mut service = RobotService::with_scanner(
+            MockOutput::default(),
+            StandCalibration::default(),
+            SolvedScanner,
+        );
+        recover_and_grip(&mut service, base);
+        install_solution(&mut service, &[]);
+        let writes_before_execute = service.output.sets.len();
+        let all_off_before_execute = service.output.all_off_count;
+
+        let messages = service.handle_packet(
+            &execute_moves_packet(
+                1,
+                &[link::CubeMove {
+                    face: link::CubeFace::Right,
+                    turn: link::TurnAmount::Clockwise,
+                }],
+                4,
+            ),
+            base,
+        );
+        assert_eq!(accepted_operation(&messages), 3);
+        for step in 0..100 {
+            service.tick(base + std::time::Duration::from_secs(20 + step));
+            if service.status().active_operation.is_none() {
+                break;
+            }
+        }
+
+        assert_eq!(service.status().controller, link::ControllerState::Ready);
+        assert_eq!(
+            service.status().stand.pose.kind,
+            link::StandPoseKind::CanonicalGrip
+        );
+        assert!(service.status().stand.outputs_enabled);
+        assert_eq!(
+            service.status().cube_session,
+            Some(link::CubeSessionStatus { id: 1 })
+        );
+        assert_eq!(service.status().scan.state, link::ScanStateKind::None);
+        assert_eq!(
+            service.status().solution.state,
+            link::SolutionStateKind::None
+        );
+        assert_eq!(service.output.all_off_count, all_off_before_execute);
+        assert_eq!(
+            &service.output.sets[writes_before_execute..],
+            &[
+                vec![(0, 2500)],
+                vec![(7, 2500)],
+                vec![(0, 1500)],
+                vec![(7, 1200)],
+            ]
+        );
+    }
+
+    #[test]
+    fn manual_moves_reject_an_empty_sequence() {
+        let base = Instant::now();
+        let mut service = RobotService::with_scanner(
+            MockOutput::default(),
+            StandCalibration::default(),
+            SolvedScanner,
+        );
+        recover_and_grip(&mut service, base);
+
+        let messages = service.handle_packet(&execute_moves_packet(1, &[], 4), base);
+        assert!(matches!(
+            &messages[0],
+            ServiceMessage::Response(ResponseMessage {
+                payload: ResponsePayload::Rejected(link::CommandRejected {
+                    reason: link::RejectionReason::InvalidPayload,
                     ..
                 }),
                 ..
