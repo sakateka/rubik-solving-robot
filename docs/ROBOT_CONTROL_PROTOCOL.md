@@ -5,6 +5,9 @@ ESP32-C6 radio controller, and the Milk-V Duo robot controller. It describes
 the intended production architecture; the current C6 USB-to-UART bridge is a
 bring-up tool, not the final application protocol.
 
+The behavioural command sequences and cube-session rules are specified in
+`ROBOT_OPERATION_WORKFLOWS.md`.
+
 ## Responsibility boundaries
 
 ```text
@@ -55,32 +58,24 @@ Servo delays are represented as deadlines. The daemon must continue handling
 UART while it waits for a rail or gripper movement to finish; it must not sleep
 inside the complete scan or solve-execute flow.
 
-### Robot lifecycle
+### Orthogonal state model
+
+Robot state is not one linear enum. For example, after a normal scan the stand
+is open while a valid facelet remains available. A status snapshot therefore
+contains independent components:
 
 ```text
-Booting
-  └─> OpenIdle
-        └─> GrippedIdle
-              └─> Scanning ─> ScanReady ─> Solving ─> Executing ─> Completed
-
-Any active state ─> Aborted
-Any state        ─> Faulted
+controller       Booting | Ready | Busy | Aborted | Faulted
+stand            commanded state of every rail and gripper
+scan             None | InProgress | Valid | Invalid
+solution         None | Solving | Ready | Executing | Completed
+active_operation optional operation ID, kind, and action progress
 ```
 
-The planned state names are:
-
-- `Booting`: hardware and model initialization is in progress.
-- `OpenIdle`: the stand is open and accepts `Grip`.
-- `GrippedIdle`: a cube is held and scan may start.
-- `Scanning`: cube reorientation, image capture, and recognition are active.
-- `ScanReady`: a validated 54-sticker facelet is available.
-- `Solving`: min2phase is producing a logical move sequence.
-- `Executing`: the logical sequence is being converted to mechanical actions
-  and executed.
-- `Completed`: the requested operation completed and the stand is open.
-- `Aborted`: PWM outputs were disabled immediately; moving axes are no longer
-  considered to have a known position.
-- `Faulted`: camera, TPU, recognition, solver, I2C, or motion planning failed.
+This avoids a cross-product such as `OpenWithValidScanAndPreparedSolution`.
+Command admission is decided using all relevant components. For example,
+`Grip` requires a known open stand and a ready controller; `Execute` requires a
+prepared solution and a mechanically valid starting pose.
 
 ### Commanded mechanical state
 
@@ -109,7 +104,7 @@ The initial command set is:
 | Command | Meaning |
 |---|---|
 | `GetStatus` | Return a complete current snapshot. |
-| `Grip` | Capture a cube from `OpenIdle`. |
+| `Grip` | Capture a cube from a known open stand. |
 | `StartScan` | Scan all six faces and validate the facelet. |
 | `Solve` | Solve the last validated facelet without moving the stand. |
 | `Execute` | Execute the already prepared solver sequence. |
@@ -117,6 +112,15 @@ The initial command set is:
 | `Open` | Perform the normal orientation-preserving release sequence. |
 | `Abort` | Immediately cancel the operation and disable every PWM channel. |
 | `RecoverToOpen` | Re-establish a known open state after operator inspection of an abort or fault. |
+| `ExecuteMoves` | Execute a bounded manual Singmaster sequence and invalidate previous scan/solution data. |
+
+`StartScan`, `Solve`, `Execute`, `ScanSolveExecute`, `Open`, and `ExecuteMoves`
+carry the cube session they expect. `Solve` additionally carries a scan
+revision; `Execute` carries the session, scan revision, and solution ID. This
+prevents a delayed client request from moving a different cube.
+
+Daemon `StartScan` returns to canonical grip and keeps the cube held. It does
+not inherit the open-after-scan behaviour of the diagnostic CLI.
 
 Long-running commands have two distinct results:
 
@@ -132,7 +136,11 @@ only means that the operation was admitted; it does not mean it has completed.
 
 A full status snapshot contains:
 
-- robot lifecycle and active operation ID;
+- controller state and active operation ID;
+- optional cube session ID; its presence means the robot has commanded custody
+  of one uninterrupted physical cube;
+- logical stand pose (`Unknown`, `Open`, canonical grip, scan pose, move pose,
+  or transitional);
 - all commanded rail and gripper positions;
 - whether PWM outputs are currently enabled;
 - camera-facing logical face, when known;
@@ -151,6 +159,8 @@ Incremental events avoid repeatedly transmitting the entire snapshot:
 - `PlanChanged`;
 - `ActionStarted` and `ActionCompleted`;
 - `OperationCompleted`;
+- `CubeSessionChanged`;
+- recoverable `OperationFailed`;
 - `Aborted`;
 - `Fault`.
 
@@ -180,11 +190,23 @@ offset  size  field
 10+N    2     CRC-16/CCITT-FALSE over header and payload
 ```
 
-The payload is limited to 1024 bytes in version 1. Top-level opcodes are
-explicit constants; wire compatibility must never depend on the declaration
-order of a Rust enum. Payload structures will use a compact `no_std`
-serialization format, provisionally `postcard`, after their first schema is
-defined.
+The payload is limited to 1024 bytes in version 1. Payload structures use
+`postcard` 1.1, whose wire format is stable and designed for `no_std`. C-like
+wire enums use explicit integer representations through `serde_repr`; their
+encoded values do not depend on Rust declaration order. Struct field order is
+part of the schema and is protected by golden encoding tests.
+
+Version 1 reserves these top-level opcode ranges:
+
+| Kind | Range | Current opcodes |
+|---|---:|---|
+| request | `0x0000..0x0fff` | `GetStatus=0x0001`, normal operations `0x0010..0x0017`, `Abort=0x00ff` |
+| response | `0x1000..0x1fff` | accepted, rejected, status snapshot |
+| event | `0x2000..0x2fff` | state, stand, face, plan, action, completion, abort, fault |
+
+The solution buffer is bounded at 32 logical moves and the status snapshot
+contains at most 16 preview actions. Count fields are validated after
+deserialization; CRC-valid input is not automatically schema-valid.
 
 Request IDs are allocated by the phone. Duo keeps a bounded cache of recent
 request results. Receiving the same ID again returns the previous result and
@@ -238,19 +260,3 @@ Abort is handled before all normal traffic:
 
 This is an immediate software stop. A servo already in motion still has its
 own physical stopping time after PWM is removed.
-
-## Implementation sequence
-
-1. Create the shared `no_std` protocol crate and test packet/COBS/CRC framing.
-2. Define command, response, event, state, and payload schemas.
-3. Add a Duo UART daemon with `GetStatus` and simulated state transitions.
-4. Pass `GetStatus`, `Grip`, and `Abort` through the existing C6 UART bridge.
-5. Refactor stand operations into deadline-driven mechanical steps.
-6. Integrate scan, solve, and execute operations into the daemon state machine.
-7. Replace the C6 development bridge with BLE GATT ↔ UART packet forwarding.
-8. Build the Android application against the same protocol crate.
-
-The first hardware-backed vertical slice is deliberately small: a host-side
-client sends framed commands through C6, Duo changes real stand state, and the
-client receives status/events. BLE and the final UI are added only after this
-control path is deterministic.

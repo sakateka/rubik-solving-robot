@@ -2269,3 +2269,73 @@ encoded frame, поэтому нулевой байт является одно�
 receiver восстановить синхронизацию после повреждённого пакета. Начальная
 реализация framing находится в shared `no_std` crate
 `crates/rubik-link-protocol`; он предназначен для Duo, C6 и Android client.
+
+Protocol schema теперь разделяет orthogonal state components: controller
+(`Booting/Ready/Busy/Aborted/Faulted`), commanded stand state, scan state,
+solution state и optional active operation. Это позволяет, например, иметь
+открытый stand одновременно с сохранённым valid scan и prepared solution.
+
+В `rubik-link-protocol` определены stable request/response/event opcode ranges,
+domain types для axes, cube faces, colors, rails, grippers, scans, solution
+moves и mechanical action preview. Payload сериализуется `postcard` 1.1;
+C-like enums используют explicit integer representation через `serde_repr`.
+Все collections имеют compile-time bounds: payload до 1024 bytes, solution до
+32 moves, plan preview до 16 actions. Count и mask fields проходят отдельную
+semantic validation после deserialization; golden tests защищают конкретные
+wire values от случайного изменения.
+
+Поведенческий contract вынесен в `docs/ROBOT_OPERATION_WORKFLOWS.md`. Успешный
+`Grip` создаёт новый cube session; scan revision и solution ID действительны
+только внутри него. Daemon `StartScan` возвращает исходный Front и оставляет
+cube в canonical grip, чтобы последующие solve/execute работали с тем же
+физическим cube. `Open`, `Abort`, restart и потеря достоверной mechanical pose
+завершают или инвалидируют session. Manual `ExecuteMoves` поддерживает
+диагностические Singmaster sequences и инвалидирует прежние scan/solution.
+
+Session-bound commands несут ожидаемые identifiers: scan — session ID, solve —
+session и scan revision, execute — session, scan revision и solution ID. Status
+теперь также содержит logical stand pose (`Unknown/Open/CanonicalGrip/ScanPose/
+MovePose/Transitional`) поверх детальных commanded rail/gripper positions.
+Recognition/facelet error считается recoverable и возвращает cube в canonical
+grip; uncertain hardware/motion state требует `RecoverToOpen`.
+
+Аппаратный independent stop и optional verification scan после решения
+зафиксированы только как deferred extensions; они не входят в текущий plan.
+
+#### Первый deadline-driven robot daemon
+
+Добавлен `rubik-robotd`, который владеет `/dev/ttyS1`, PCA9685 и authoritative
+robot status. UART настраивается в `115200 raw` через `stty`; daemon принимает
+COBS frames, проверяет packet length/CRC/version, декодирует `postcard` payload
+и возвращает framed responses/events. Incremental decoder восстанавливается на
+следующем zero delimiter после malformed или oversized frame.
+
+Текущие реальные commands: `GetStatus`, `RecoverToOpen`, `Grip`, `Abort`.
+Recovery и grip не вызывают `sleep`: servo movement представлено phase +
+`Instant` deadline, а основной event loop продолжает каждые 10 ms принимать
+UART. `RecoverToOpen` открывает left/right rails, затем top/bottom, и только при
+полностью открытых rails ставит grippers perpendicular. `Grip` создаёт cube
+session только после завершения gripper и rail deadlines. `Abort` немедленно
+вызывает PCA `all_off`, отменяет active phase и переводит pose/session в
+unknown/invalid state.
+
+Daemon хранит 16 последних request responses: повтор request ID с тем же opcode
+не запускает физическую операцию второй раз. `StartScan`, solve, execute и
+manual moves уже описаны schema, но пока отвечают `UnsupportedCommand`, потому
+что их blocking choreography ещё не переведена в mechanical action scheduler.
+
+Сборка для Duo включена в общий скрипт:
+
+```sh
+bash scripts/build-duo.sh
+```
+
+Запуск на board после копирования binary:
+
+```sh
+./rubik-robotd --confirm-stand-motion
+```
+
+При любом штатном завершении event loop и при его ошибке daemon делает
+best-effort `all_off`; после startup первый допустимый motion command —
+`RecoverToOpen`.

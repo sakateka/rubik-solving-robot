@@ -58,6 +58,11 @@ name = "rubik-full-scan"
 path = "src/bin/rubik-full-scan.rs"
 required-features = ["pca9685", "cvi-camera"]
 
+[[bin]]
+name = "rubik-robotd"
+path = "src/bin/rubik-robotd.rs"
+required-features = ["pca9685"]
+
 [dependencies]
 anyhow = "1"
 candle-core = { version = "0.11.0", default-features = false }
@@ -68,6 +73,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 humantime = "2"
 min2phase = { git = "https://github.com/cs0x7f/min2phase_rust.git", rev = "56ce7d4f65b0d2cc49496c43a7ddfff094b227c1" }
 i2cdev = { version = "0.6.2", optional = true }
+rubik-link-protocol = { path = "crates/rubik-link-protocol" }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 
