@@ -2494,3 +2494,30 @@ curl http://192.168.4.1/api/status
 Встроенная страница опрашивает этот endpoint раз в секунду после завершения
 предыдущего запроса и показывает полный JSON snapshot. Следующий transport
 milestone — command HTTP endpoints и WebSocket для protocol events.
+
+#### HTTP-команды робота
+
+На C6 добавлены `POST` endpoints для `recover`, `grip`, `scan`, `solve`,
+`execute`, `scan-solve-execute`, `open` и priority `abort`. Это не отдельная
+логика управления: handler кодирует тот же protocol request, который отправляет
+`rubik-robotctl`, и возвращает решение Duo об admission. Принятая операция даёт
+HTTP `202` и пару `request_id`/`operation_id`; protocol rejection возвращается
+как HTTP `409`. Session-bound команды принимают IDs из текущего status snapshot.
+
+Пока WebSocket ещё не реализован, operation events для HTTP upstream намеренно
+не накапливаются в response queue: browser восстанавливает актуальное состояние
+через `/api/status`. После появления `/api/events` gateway направит эти packets
+в отдельный event channel.
+
+Тихая проверка с `rubik-robotd-sim` начинается так:
+
+```sh
+curl -X POST http://192.168.4.1/api/recover
+curl -X POST http://192.168.4.1/api/grip
+curl http://192.168.4.1/api/status
+curl -X POST http://192.168.4.1/api/abort
+```
+
+Полный набор JSON payloads записан в
+`firmware/esp32c6-controller/README.md`. Следующий этап — WebSocket events, затем
+кнопки и визуализация workflow во встроенном browser UI.

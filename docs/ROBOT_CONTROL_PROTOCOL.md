@@ -259,6 +259,20 @@ the browser. The initial API surface is:
 | `POST` | `/api/abort` | Priority software stop. |
 | `GET` | `/api/events` | WebSocket event stream. |
 
+`recover`, `grip`, and `abort` have an empty request body. Session-bound
+commands use the same field names as the UART protocol payloads:
+
+```json
+{"session_id": 1}
+{"session_id": 1, "scan_revision": 2}
+{"session_id": 1, "scan_revision": 2, "solution_id": 3}
+```
+
+An admitted command returns HTTP `202` with its protocol request and operation
+IDs. A command rejected by Duo returns HTTP `409`; malformed JSON is HTTP `400`,
+and an unavailable Duo is HTTP `504`. C6 does not reinterpret Duo admission
+rules.
+
 The firmware configuration is a compile-time overlay. A committed default
 contains non-secret bring-up values; an ignored `config/local.toml` overrides
 the SSID, WPA2 password, channel, address, or port for a particular robot.

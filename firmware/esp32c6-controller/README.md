@@ -96,6 +96,36 @@ HTTP → C6 gateway → UART → Duo daemon. If Duo does not answer within three
 seconds, C6 returns HTTP `504 Gateway Timeout`. `GET /api/health` only verifies
 the C6 HTTP server and does not contact Duo.
 
+## Command API
+
+Commands without protocol payloads:
+
+```sh
+curl -X POST http://192.168.4.1/api/recover
+curl -X POST http://192.168.4.1/api/grip
+curl -X POST http://192.168.4.1/api/abort
+```
+
+Session-bound commands accept JSON copied from the current status snapshot:
+
+```sh
+curl -X POST -H 'Content-Type: application/json' -d '{"session_id":1}' http://192.168.4.1/api/scan
+curl -X POST -H 'Content-Type: application/json' -d '{"session_id":1,"scan_revision":1}' http://192.168.4.1/api/solve
+curl -X POST -H 'Content-Type: application/json' -d '{"session_id":1,"scan_revision":1,"solution_id":1}' http://192.168.4.1/api/execute
+curl -X POST -H 'Content-Type: application/json' -d '{"session_id":1}' http://192.168.4.1/api/scan-solve-execute
+curl -X POST -H 'Content-Type: application/json' -d '{"session_id":1}' http://192.168.4.1/api/open
+```
+
+Accepted operations return HTTP `202`, for example:
+
+```json
+{"result":"accepted","request_id":2147483650,"operation_id":4}
+```
+
+Duo admission failures return HTTP `409` and preserve its rejection reason and
+controller state. The current web page still uses status polling; command
+buttons are added after the event WebSocket is available.
+
 ## Quiet end-to-end check
 
 Run `rubik-robotd-sim` on Duo, then execute on the C6 development host:
@@ -112,6 +142,6 @@ request caching, deadlines and protocol events remain real.
 
 ## Next milestone
 
-Add command endpoints and a WebSocket event stream. Robot decisions and state
-remain on the Duo; C6 only adapts HTTP/WebSocket messages to the existing link
-protocol.
+Add a WebSocket event stream and command controls to the embedded page. Robot
+decisions and state remain on the Duo; C6 only adapts HTTP/WebSocket messages to
+the existing link protocol.

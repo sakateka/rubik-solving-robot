@@ -1,5 +1,6 @@
 #![no_std]
 #![no_main]
+#![recursion_limit = "256"]
 #![deny(
     clippy::mem_forget,
     reason = "mem::forget is generally not safe to do with esp_hal types, especially those \
@@ -33,11 +34,12 @@ use esp_radio::wifi::{
     ap::AccessPointConfig,
 };
 use picoserve::{
-    response::{File, Json, StatusCode},
-    routing::{Router, get, get_service},
+    response::{File, IntoResponse, Json, StatusCode},
+    routing::{Router, get, get_service, post},
 };
 use rubik_link_gateway::Gateway;
 use rubik_link_protocol::{self as link, CRC_LEN, HEADER_LEN, MAX_PACKET_LEN, MAX_UART_FRAME_LEN};
+use serde::Serialize;
 use static_cell::StaticCell;
 
 mod app_config {
@@ -48,6 +50,7 @@ esp_bootloader_esp_idf::esp_app_desc!();
 
 const HTTP_RPC_TIMEOUT: Duration = Duration::from_secs(3);
 const HTTP_REQUEST_ID_START: u32 = 0x8000_0001;
+const HTTP_REQUEST_PAYLOAD_CAPACITY: usize = 64;
 
 static NEXT_HTTP_REQUEST_ID: AtomicU32 = AtomicU32::new(HTTP_REQUEST_ID_START);
 static HTTP_REQUESTS: Channel<CriticalSectionRawMutex, RequestPacket, 1> = Channel::new();
@@ -55,14 +58,32 @@ static HTTP_RESPONSES: Channel<CriticalSectionRawMutex, OwnedPacket, 1> = Channe
 static HTTP_CANCELLATIONS: Channel<CriticalSectionRawMutex, u32, 1> = Channel::new();
 
 struct RequestPacket {
-    bytes: [u8; HEADER_LEN + CRC_LEN],
+    bytes: [u8; HEADER_LEN + HTTP_REQUEST_PAYLOAD_CAPACITY + CRC_LEN],
     len: usize,
 }
 
 impl RequestPacket {
-    fn new(opcode: link::RequestOpcode, request_id: u32) -> Result<Self, link::WireError> {
+    fn empty(opcode: link::RequestOpcode, request_id: u32) -> Result<Self, ()> {
+        Self::from_payload(opcode, request_id, &[])
+    }
+
+    fn with_payload<T: Serialize>(
+        opcode: link::RequestOpcode,
+        request_id: u32,
+        value: &T,
+    ) -> Result<Self, ()> {
+        let mut payload = [0; HTTP_REQUEST_PAYLOAD_CAPACITY];
+        let payload = link::encode_payload(value, &mut payload).map_err(|_| ())?;
+        Self::from_payload(opcode, request_id, payload)
+    }
+
+    fn from_payload(
+        opcode: link::RequestOpcode,
+        request_id: u32,
+        payload: &[u8],
+    ) -> Result<Self, ()> {
         let mut packet = Self {
-            bytes: [0; HEADER_LEN + CRC_LEN],
+            bytes: [0; HEADER_LEN + HTTP_REQUEST_PAYLOAD_CAPACITY + CRC_LEN],
             len: 0,
         };
         packet.len = link::encode_packet(
@@ -70,10 +91,11 @@ impl RequestPacket {
                 kind: link::MessageKind::Request,
                 opcode: opcode.into(),
                 request_id,
-                payload: &[],
+                payload,
             },
             &mut packet.bytes,
-        )?;
+        )
+        .map_err(|_| ())?;
         Ok(packet)
     }
 
@@ -91,6 +113,48 @@ impl OwnedPacket {
     fn as_slice(&self) -> &[u8] {
         &self.bytes[..self.len]
     }
+}
+
+#[derive(Serialize)]
+#[serde(tag = "result", rename_all = "snake_case")]
+enum ApiCommandBody {
+    Accepted {
+        request_id: u32,
+        operation_id: Option<u32>,
+    },
+    Error {
+        error: &'static str,
+        reason: Option<link::RejectionReason>,
+        controller: Option<link::ControllerState>,
+    },
+}
+
+struct ApiCommandResponse {
+    status: StatusCode,
+    body: ApiCommandBody,
+}
+
+impl IntoResponse for ApiCommandResponse {
+    async fn write_to<R, W>(
+        self,
+        connection: picoserve::response::Connection<'_, R>,
+        response_writer: W,
+    ) -> Result<picoserve::ResponseSent, W::Error>
+    where
+        R: picoserve::io::Read,
+        W: picoserve::response::ResponseWriter<Error = R::Error>,
+    {
+        Json(self.body)
+            .into_response()
+            .with_status_code(self.status)
+            .write_to(connection, response_writer)
+            .await
+    }
+}
+
+enum HttpRpcError {
+    Timeout,
+    InvalidPacket,
 }
 
 macro_rules! make_static {
@@ -178,7 +242,15 @@ async fn http_server(network: Stack<'static>) -> ! {
                 br#"{"status":"ok","service":"rubik-robot"}"#,
             )),
         )
-        .route("/api/status", get(api_status));
+        .route("/api/status", get(api_status))
+        .route("/api/recover", post(api_recover))
+        .route("/api/grip", post(api_grip))
+        .route("/api/scan", post(api_scan))
+        .route("/api/solve", post(api_solve))
+        .route("/api/execute", post(api_execute))
+        .route("/api/scan-solve-execute", post(api_scan_solve_execute))
+        .route("/api/open", post(api_open))
+        .route("/api/abort", post(api_abort));
     let server_config = picoserve::Config::const_default().close_connection_after_response();
     let mut tcp_rx_buffer = [0; 2048];
     let mut tcp_tx_buffer = [0; 4096];
@@ -201,35 +273,17 @@ async fn http_server(network: Stack<'static>) -> ! {
     reason = "the HTTP request future is stored in picoserve task state"
 )]
 async fn api_status() -> Result<Json<link::StatusSnapshot>, (StatusCode, &'static str)> {
-    let request_id = NEXT_HTTP_REQUEST_ID.fetch_add(1, Ordering::Relaxed) | 0x8000_0000;
-    let request = RequestPacket::new(link::RequestOpcode::GetStatus, request_id).map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "failed to encode status request",
-        )
-    })?;
-
-    HTTP_REQUESTS.send(request).await;
-    let response = with_timeout(HTTP_RPC_TIMEOUT, async {
-        loop {
-            let response = HTTP_RESPONSES.receive().await;
-            let packet = link::decode_packet(response.as_slice()).map_err(|_| ())?;
-            if packet.request_id == request_id {
-                break Result::<OwnedPacket, ()>::Ok(response);
-            }
-        }
-    })
-    .await;
-    let response = match response {
-        Ok(Ok(response)) => response,
-        Ok(Err(())) => {
-            return Err((StatusCode::BAD_GATEWAY, "Duo returned an invalid packet"));
-        }
-        Err(_) => {
-            HTTP_CANCELLATIONS.send(request_id).await;
-            return Err((StatusCode::GATEWAY_TIMEOUT, "Duo did not answer in time"));
-        }
-    };
+    let request_id = next_http_request_id();
+    let request =
+        RequestPacket::empty(link::RequestOpcode::GetStatus, request_id).map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to encode status request",
+            )
+        })?;
+    let response = send_http_request(request_id, request)
+        .await
+        .map_err(status_rpc_error)?;
 
     let packet = link::decode_packet(response.as_slice())
         .map_err(|_| (StatusCode::BAD_GATEWAY, "Duo returned an invalid packet"))?;
@@ -244,6 +298,193 @@ async fn api_status() -> Result<Json<link::StatusSnapshot>, (StatusCode, &'stati
         .validate()
         .map_err(|_| (StatusCode::BAD_GATEWAY, "invalid robot status from Duo"))?;
     Ok(Json(snapshot))
+}
+
+async fn api_recover() -> ApiCommandResponse {
+    send_empty_command(link::RequestOpcode::RecoverToOpen).await
+}
+
+async fn api_grip() -> ApiCommandResponse {
+    send_empty_command(link::RequestOpcode::Grip).await
+}
+
+async fn api_scan(Json(command): Json<link::StartScanCommand>) -> ApiCommandResponse {
+    send_command(link::RequestOpcode::StartScan, &command).await
+}
+
+async fn api_solve(Json(command): Json<link::SolveCommand>) -> ApiCommandResponse {
+    send_command(link::RequestOpcode::Solve, &command).await
+}
+
+#[allow(
+    clippy::large_stack_frames,
+    reason = "picoserve stores the HTTP handler future in static task storage"
+)]
+async fn api_execute(Json(command): Json<link::ExecuteCommand>) -> ApiCommandResponse {
+    send_command(link::RequestOpcode::Execute, &command).await
+}
+
+async fn api_scan_solve_execute(
+    Json(command): Json<link::ScanSolveExecuteCommand>,
+) -> ApiCommandResponse {
+    send_command(link::RequestOpcode::ScanSolveExecute, &command).await
+}
+
+async fn api_open(Json(command): Json<link::OpenCommand>) -> ApiCommandResponse {
+    send_command(link::RequestOpcode::Open, &command).await
+}
+
+async fn api_abort() -> ApiCommandResponse {
+    send_empty_command(link::RequestOpcode::Abort).await
+}
+
+fn next_http_request_id() -> u32 {
+    NEXT_HTTP_REQUEST_ID.fetch_add(1, Ordering::Relaxed) | 0x8000_0000
+}
+
+#[allow(
+    clippy::large_stack_frames,
+    reason = "picoserve stores the HTTP handler future in static task storage"
+)]
+async fn send_empty_command(opcode: link::RequestOpcode) -> ApiCommandResponse {
+    let request_id = next_http_request_id();
+    let request = match RequestPacket::empty(opcode, request_id) {
+        Ok(request) => request,
+        Err(()) => {
+            return api_command_error(StatusCode::INTERNAL_SERVER_ERROR, "encode request");
+        }
+    };
+    send_command_request(request_id, request).await
+}
+
+#[allow(
+    clippy::large_stack_frames,
+    reason = "picoserve stores the HTTP handler future in static task storage"
+)]
+async fn send_command<T: Serialize>(
+    opcode: link::RequestOpcode,
+    payload: &T,
+) -> ApiCommandResponse {
+    let request_id = next_http_request_id();
+    let request = match RequestPacket::with_payload(opcode, request_id, payload) {
+        Ok(request) => request,
+        Err(()) => {
+            return api_command_error(StatusCode::INTERNAL_SERVER_ERROR, "encode request");
+        }
+    };
+    send_command_request(request_id, request).await
+}
+
+#[allow(
+    clippy::large_stack_frames,
+    reason = "picoserve stores the HTTP handler future in static task storage"
+)]
+async fn send_command_request(request_id: u32, request: RequestPacket) -> ApiCommandResponse {
+    let response = match send_http_request(request_id, request).await {
+        Ok(response) => response,
+        Err(error) => return command_rpc_error(error),
+    };
+    let packet = match link::decode_packet(response.as_slice()) {
+        Ok(packet) => packet,
+        Err(_) => return api_command_error(StatusCode::BAD_GATEWAY, "invalid Duo packet"),
+    };
+    if packet.kind != link::MessageKind::Response {
+        return api_command_error(StatusCode::BAD_GATEWAY, "unexpected Duo message");
+    }
+
+    match link::ResponseOpcode::try_from(packet.opcode) {
+        Ok(link::ResponseOpcode::CommandAccepted) => {
+            let accepted: link::CommandAccepted = match link::decode_payload(packet.payload) {
+                Ok(accepted) => accepted,
+                Err(_) => {
+                    return api_command_error(
+                        StatusCode::BAD_GATEWAY,
+                        "invalid acceptance payload",
+                    );
+                }
+            };
+            ApiCommandResponse {
+                status: StatusCode::ACCEPTED,
+                body: ApiCommandBody::Accepted {
+                    request_id,
+                    operation_id: accepted.operation_id,
+                },
+            }
+        }
+        Ok(link::ResponseOpcode::CommandRejected) => {
+            let rejected: link::CommandRejected = match link::decode_payload(packet.payload) {
+                Ok(rejected) => rejected,
+                Err(_) => {
+                    return api_command_error(StatusCode::BAD_GATEWAY, "invalid rejection payload");
+                }
+            };
+            ApiCommandResponse {
+                status: StatusCode::CONFLICT,
+                body: ApiCommandBody::Error {
+                    error: "command rejected",
+                    reason: Some(rejected.reason),
+                    controller: Some(rejected.controller),
+                },
+            }
+        }
+        _ => api_command_error(StatusCode::BAD_GATEWAY, "unexpected Duo response"),
+    }
+}
+
+#[allow(
+    clippy::large_stack_frames,
+    reason = "picoserve stores the HTTP handler future in static task storage"
+)]
+async fn send_http_request(
+    request_id: u32,
+    request: RequestPacket,
+) -> Result<OwnedPacket, HttpRpcError> {
+    HTTP_REQUESTS.send(request).await;
+    let response = with_timeout(HTTP_RPC_TIMEOUT, async {
+        loop {
+            let response = HTTP_RESPONSES.receive().await;
+            let packet = link::decode_packet(response.as_slice())
+                .map_err(|_| HttpRpcError::InvalidPacket)?;
+            if packet.request_id == request_id {
+                break Ok(response);
+            }
+        }
+    })
+    .await;
+    match response {
+        Ok(response) => response,
+        Err(_) => {
+            HTTP_CANCELLATIONS.send(request_id).await;
+            Err(HttpRpcError::Timeout)
+        }
+    }
+}
+
+fn status_rpc_error(error: HttpRpcError) -> (StatusCode, &'static str) {
+    match error {
+        HttpRpcError::Timeout => (StatusCode::GATEWAY_TIMEOUT, "Duo did not answer in time"),
+        HttpRpcError::InvalidPacket => (StatusCode::BAD_GATEWAY, "Duo returned an invalid packet"),
+    }
+}
+
+fn command_rpc_error(error: HttpRpcError) -> ApiCommandResponse {
+    match error {
+        HttpRpcError::Timeout => api_command_error(StatusCode::GATEWAY_TIMEOUT, "Duo timeout"),
+        HttpRpcError::InvalidPacket => {
+            api_command_error(StatusCode::BAD_GATEWAY, "invalid Duo packet")
+        }
+    }
+}
+
+fn api_command_error(status: StatusCode, error: &'static str) -> ApiCommandResponse {
+    ApiCommandResponse {
+        status,
+        body: ApiCommandBody::Error {
+            error,
+            reason: None,
+            controller: None,
+        },
+    }
 }
 
 #[allow(
@@ -314,6 +555,11 @@ async fn gateway_loop(
             let Ok(Some(packet_len)) = gateway.dequeue_network_packet(&mut frame_buffer) else {
                 break;
             };
+            if link::decode_packet(&frame_buffer[..packet_len])
+                .is_ok_and(|packet| packet.kind == link::MessageKind::Event)
+            {
+                continue;
+            }
             let mut packet = OwnedPacket {
                 bytes: [0; MAX_PACKET_LEN],
                 len: packet_len,

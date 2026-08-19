@@ -37,6 +37,7 @@ log = "0.4.27"
 picoserve = { version = "0.18.0", features = ["embassy", "json", "log"] }
 rubik-link-gateway = { path = "../../crates/rubik-link-gateway" }
 rubik-link-protocol = { path = "../../crates/rubik-link-protocol" }
+serde = { version = "1", default-features = false, features = ["derive"] }
 static_cell = "2.1"
 
 
