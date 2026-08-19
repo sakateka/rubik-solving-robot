@@ -63,6 +63,11 @@ name = "rubik-robotd"
 path = "src/bin/rubik-robotd.rs"
 required-features = ["pca9685"]
 
+[[bin]]
+name = "rubik-robotd-sim"
+path = "src/bin/rubik-robotd-sim.rs"
+required-features = ["pca9685"]
+
 [dependencies]
 anyhow = "1"
 candle-core = { version = "0.11.0", default-features = false }

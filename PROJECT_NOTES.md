@@ -2380,3 +2380,38 @@ COBS delimiter.
 полученного из времени запуска и PID. Начинать всегда с `1` нельзя: daemon
 помнит последние 16 responses и должен отвергать случай, когда один ID сначала
 использован для `GetStatus`, а затем для другого opcode, например `Abort`.
+
+#### UART simulator daemon
+
+`rubik-robotd-sim` запускает тот же `RobotService`, protocol decoder и UART
+event loop, что и hardware-backed `rubik-robotd`, но подставляет in-memory PWM
+backend. Симулятор не открывает `/dev/i2c-*` и физически не может подать servo
+pulse. При этом request cache, deadline durations, state transitions и events
+остаются production-кодом, поэтому через реальный C6 bridge можно безопасно
+проверять `recover`, `grip`, `status` и `abort`.
+
+На Duo одновременно должен работать только один из двух daemon-процессов,
+поскольку оба читают `/dev/ttyS1`. Запуск симулятора:
+
+```sh
+./rubik-robotd-sim
+```
+
+Для просмотра виртуальных PWM operations:
+
+```sh
+./rubik-robotd-sim --trace-pwm
+```
+
+После этого с development host можно выполнить полный тихий smoke test:
+
+```sh
+./rubik-robotctl status
+./rubik-robotctl --confirm-stand-motion recover
+./rubik-robotctl --confirm-stand-motion grip
+./rubik-robotctl abort
+```
+
+Motion confirmation остаётся на client даже при работе с simulator: клиент не
+должен менять safety policy в зависимости от того, какой daemon сейчас слушает
+UART. На стороне simulator специальное подтверждение не требуется.

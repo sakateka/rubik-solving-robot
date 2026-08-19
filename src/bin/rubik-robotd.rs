@@ -1,24 +1,14 @@
 //! UART-facing, deadline-driven robot control daemon.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use clap::Parser;
 use rubik_scan::{
     pca9685::Pca9685,
-    robot_link::{UartFrameEncoder, UartStreamDecoder},
-    robot_service::{RobotService, ServiceMessage},
+    robot_daemon::{run_uart_daemon, UartDaemonOptions},
+    robot_service::RobotService,
     stand::StandCalibration,
 };
-use std::{
-    fs::{File, OpenOptions},
-    io::{Read, Write},
-    path::{Path, PathBuf},
-    process::Command,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        mpsc, Arc,
-    },
-    time::{Duration, Instant},
-};
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(about = "Run the UART robot control service")]
@@ -59,153 +49,21 @@ fn main() -> Result<()> {
             "refusing to start robot daemon; pass --confirm-stand-motion after checking the stand"
         );
     }
-    if !cli.skip_uart_config {
-        configure_uart(&cli.uart_device)?;
-    }
-
     let calibration = match &cli.config {
         Some(path) => StandCalibration::load(path)?,
         None => StandCalibration::default(),
     };
     let mut output = Pca9685::open(&cli.i2c_device, cli.address)?;
     let pwm = output.initialize_safe_pwm(cli.pwm_hz)?;
-    let mut service = RobotService::new(output, calibration);
-
-    let uart = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&cli.uart_device)
-        .with_context(|| format!("failed to open UART {}", cli.uart_device.display()))?;
-    let reader = uart
-        .try_clone()
-        .context("failed to clone UART for reader thread")?;
-    let mut writer = uart;
-    let receiver = spawn_uart_reader(reader);
-    let mut decoder = UartStreamDecoder::default();
-    let mut encoder = UartFrameEncoder::default();
-
-    let running = Arc::new(AtomicBool::new(true));
-    let signal_running = Arc::clone(&running);
-    ctrlc::set_handler(move || signal_running.store(false, Ordering::SeqCst))
-        .context("failed to install Ctrl-C shutdown handler")?;
-
-    eprintln!(
-        "rubik-robotd ready uart={} pwm_hz={:.3} pose=unknown; send RecoverToOpen first",
-        cli.uart_device.display(),
-        pwm.pwm_hz()
-    );
-
-    let run_result = run_event_loop(
-        &running,
-        &receiver,
-        &mut decoder,
-        &mut encoder,
-        &mut writer,
-        &mut service,
-    );
-    let shutdown_result = service.shutdown();
-
-    match (run_result, shutdown_result) {
-        (Ok(()), Ok(())) => {
-            eprintln!("rubik-robotd stopped; outputs=all_off");
-            Ok(())
-        }
-        (Err(error), Ok(())) => Err(error),
-        (Ok(()), Err(error)) => Err(error).context("failed to disable outputs on shutdown"),
-        (Err(run_error), Err(shutdown_error)) => Err(run_error).context(format!(
-            "daemon failed and outputs could not be disabled: {shutdown_error:#}"
-        )),
-    }
-}
-
-fn run_event_loop<D>(
-    running: &AtomicBool,
-    receiver: &mpsc::Receiver<std::io::Result<Vec<u8>>>,
-    decoder: &mut UartStreamDecoder,
-    encoder: &mut UartFrameEncoder,
-    writer: &mut File,
-    service: &mut RobotService<D>,
-) -> Result<()>
-where
-    D: rubik_scan::pca9685::PwmOutput,
-{
-    while running.load(Ordering::SeqCst) {
-        match receiver.recv_timeout(Duration::from_millis(10)) {
-            Ok(Ok(bytes)) => {
-                for byte in bytes {
-                    match decoder.push(byte) {
-                        Some(Ok(packet)) => {
-                            let messages = service.handle_packet(&packet, Instant::now());
-                            write_messages(writer, encoder, &messages)?;
-                        }
-                        Some(Err(error)) => eprintln!("discarded UART frame: {error:?}"),
-                        None => {}
-                    }
-                }
-            }
-            Ok(Err(error)) => return Err(error).context("UART reader failed"),
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => bail!("UART reader stopped"),
-        }
-
-        let messages = service.tick(Instant::now());
-        write_messages(writer, encoder, &messages)?;
-    }
-    Ok(())
-}
-
-fn configure_uart(path: &Path) -> Result<()> {
-    let status = Command::new("stty")
-        .args(["-F"])
-        .arg(path)
-        .args(["115200", "raw", "-echo", "-ixon", "-ixoff"])
-        .status()
-        .with_context(|| format!("failed to run stty for {}", path.display()))?;
-    if !status.success() {
-        bail!("stty failed for {} with {status}", path.display());
-    }
-    Ok(())
-}
-
-fn spawn_uart_reader(mut reader: File) -> mpsc::Receiver<std::io::Result<Vec<u8>>> {
-    let (sender, receiver) = mpsc::channel();
-    std::thread::spawn(move || loop {
-        let mut buffer = [0u8; 128];
-        match reader.read(&mut buffer) {
-            Ok(0) => {
-                let _ = sender.send(Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "UART returned EOF",
-                )));
-                break;
-            }
-            Ok(count) => {
-                if sender.send(Ok(buffer[..count].to_vec())).is_err() {
-                    break;
-                }
-            }
-            Err(error) => {
-                let _ = sender.send(Err(error));
-                break;
-            }
-        }
-    });
-    receiver
-}
-
-fn write_messages(
-    writer: &mut File,
-    encoder: &mut UartFrameEncoder,
-    messages: &[ServiceMessage],
-) -> Result<()> {
-    for message in messages {
-        let frame = message.encode_uart(encoder)?;
-        writer
-            .write_all(frame)
-            .context("failed to write UART frame")?;
-    }
-    writer.flush().context("failed to flush UART responses")?;
-    Ok(())
+    eprintln!("hardware backend pwm_hz={:.3}", pwm.pwm_hz());
+    run_uart_daemon(
+        UartDaemonOptions {
+            process_name: "rubik-robotd",
+            uart_device: &cli.uart_device,
+            skip_uart_config: cli.skip_uart_config,
+        },
+        RobotService::new(output, calibration),
+    )
 }
 
 fn parse_address(value: &str) -> Result<u16, String> {
