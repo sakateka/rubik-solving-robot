@@ -61,7 +61,7 @@ required-features = ["pca9685", "cvi-camera"]
 [[bin]]
 name = "rubik-robotd"
 path = "src/bin/rubik-robotd.rs"
-required-features = ["pca9685"]
+required-features = ["pca9685", "cvi-camera"]
 
 [[bin]]
 name = "rubik-robotd-sim"

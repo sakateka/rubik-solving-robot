@@ -3,7 +3,7 @@
 use crate::{
     pca9685::PwmOutput,
     robot_link::{UartFrameEncoder, UartStreamDecoder},
-    robot_service::{RobotService, ServiceMessage},
+    robot_service::{FaceScanner, RobotService, ServiceMessage},
 };
 use anyhow::{bail, Context, Result};
 use std::{
@@ -24,12 +24,13 @@ pub struct UartDaemonOptions<'a> {
     pub skip_uart_config: bool,
 }
 
-pub fn run_uart_daemon<D>(
+pub fn run_uart_daemon<D, S>(
     options: UartDaemonOptions<'_>,
-    mut service: RobotService<D>,
+    mut service: RobotService<D, S>,
 ) -> Result<()>
 where
     D: PwmOutput,
+    S: FaceScanner,
 {
     if !options.skip_uart_config {
         configure_uart(options.uart_device)?;
@@ -82,16 +83,17 @@ where
     }
 }
 
-fn run_event_loop<D>(
+fn run_event_loop<D, S>(
     running: &AtomicBool,
     receiver: &mpsc::Receiver<std::io::Result<Vec<u8>>>,
     decoder: &mut UartStreamDecoder,
     encoder: &mut UartFrameEncoder,
     writer: &mut File,
-    service: &mut RobotService<D>,
+    service: &mut RobotService<D, S>,
 ) -> Result<()>
 where
     D: PwmOutput,
+    S: FaceScanner,
 {
     while running.load(Ordering::SeqCst) {
         match receiver.recv_timeout(Duration::from_millis(10)) {

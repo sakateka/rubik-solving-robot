@@ -2523,3 +2523,53 @@ curl -X POST http://192.168.4.1/api/abort
 тестовая панель с кнопками этих операций: IDs для session-bound команд берутся
 из последнего status snapshot, а `abort` остаётся доступным без подтверждения.
 Следующий этап — WebSocket events и визуализация прогресса workflow без polling.
+
+#### Stateful `StartScan` в Duo daemon
+
+`rubik-robotd` теперь принимает protocol-команду `StartScan` для текущей cube
+session. Preconditions проверяются на Duo: controller должен быть `Ready`,
+stand — в `CanonicalGrip`, а `session_id` обязан совпасть с authoritative
+session. Поэтому HTTP `scan` больше не зависит от появления WebSocket: browser
+берёт session ID из `/api/status`, а WebSocket позже заменит polling только для
+отображения событий в реальном времени.
+
+Проверенная на стенде последовательность `L → R → D → U → F → B` перенесена в
+deadline-driven executor из 20 механических действий и 6 capture actions.
+Каждое движение запускается одним PWM update, а завершение обрабатывается
+следующим `tick` после configured deadline. UART event loop в это время
+продолжает принимать `GetStatus` и немедленный `Abort`. После последней грани
+куб возвращается Front к камере и остаётся в `CanonicalGrip`; session не
+меняется.
+
+Production backend открывает GC2083 и BF16 CVI model один раз при старте
+daemon, делает 10 warm-up VPSS frames, а затем для каждой грани выполняет тот
+же preprocess/filter/NMS/grid pipeline, который использует проверенный
+`rubik-full-scan`. После каждой грани обновляются face mask, цвета, confidence
+и color counts, и отправляется `FaceScanned`. Каждый запуск создаёт каталог
+`/mnt/storage/rubik-scan-records/scan-YYYY-MM-DD_HH-MM-SS-rN` с PNG, YOLO labels,
+распознанной строкой каждой грани и итоговым `result.txt`.
+
+`rubik-robotd-sim` использует тот же executor, но возвращает шесть
+детерминированных одноцветных граней. Это позволяет проверить через web UI
+полный `recover → grip → scan` без камеры и движения сервоприводов. Unit tests
+покрывают успешные шесть граней, stale session ID и abort до motion deadline.
+
+Проверки этого этапа:
+
+```sh
+cargo test --features pca9685 --lib --bins
+cargo clippy --features pca9685 --lib --bins -- -D warnings
+./scripts/build-duo.sh
+```
+
+Cross-build собирает hardware daemon с `cvi-camera,pca9685`; его основные
+параметры имеют production defaults, но при необходимости переопределяются:
+
+```sh
+./rubik-robotd --confirm-stand-motion --cvimodel /mnt/storage/cube_yolov8n_320_bf16.cvimodel
+```
+
+Следующая физическая проверка — запустить новый daemon на Duo, выполнить
+`recover`, `grip`, `scan` из web UI и сравнить status/artifacts с прежним
+`rubik-full-scan`. После этого логичный следующий software milestone — `Solve`
+в daemon; WebSocket можно делать параллельно как улучшение UX.

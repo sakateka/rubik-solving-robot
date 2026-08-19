@@ -23,4 +23,6 @@ pub mod stand;
 pub mod stand_runtime;
 #[cfg(feature = "cvi-runtime")]
 pub mod tpu;
+#[cfg(feature = "cvi-camera")]
+pub mod vision_scanner;
 mod yolo_v8;

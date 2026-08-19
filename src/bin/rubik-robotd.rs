@@ -7,6 +7,7 @@ use rubik_scan::{
     robot_daemon::{run_uart_daemon, UartDaemonOptions},
     robot_service::RobotService,
     stand::StandCalibration,
+    vision_scanner::VisionScanner,
 };
 use std::path::PathBuf;
 
@@ -37,6 +38,30 @@ struct Cli {
     #[arg(long, default_value_t = 50.0)]
     pwm_hz: f64,
 
+    /// Path to the vendor GC2083 sensor configuration
+    #[arg(long, default_value = "/mnt/data/sensor_cfg.ini")]
+    sensor_config: PathBuf,
+
+    /// VPSS frames discarded once while automatic exposure settles
+    #[arg(long, default_value_t = 10)]
+    warmup_frames: u32,
+
+    /// Production CV181X TPU model
+    #[arg(long, default_value = "/mnt/storage/cube_yolov8n_320_bf16.cvimodel")]
+    cvimodel: PathBuf,
+
+    /// Root directory for per-scan training artifacts
+    #[arg(long, default_value = "/mnt/storage/rubik-scan-records")]
+    record_dir: PathBuf,
+
+    /// Detection confidence threshold
+    #[arg(long, default_value_t = 0.5)]
+    conf: f32,
+
+    /// Class-agnostic NMS IoU threshold
+    #[arg(long, default_value_t = 0.5)]
+    iou: f32,
+
     /// Required acknowledgement that remote commands may move the stand
     #[arg(long)]
     confirm_stand_motion: bool,
@@ -55,6 +80,14 @@ fn main() -> Result<()> {
     };
     let mut output = Pca9685::open(&cli.i2c_device, cli.address)?;
     let pwm = output.initialize_safe_pwm(cli.pwm_hz)?;
+    let scanner = VisionScanner::open(
+        &cli.sensor_config,
+        cli.warmup_frames,
+        &cli.cvimodel,
+        cli.conf,
+        cli.iou,
+        cli.record_dir,
+    )?;
     eprintln!("hardware backend pwm_hz={:.3}", pwm.pwm_hz());
     run_uart_daemon(
         UartDaemonOptions {
@@ -62,7 +95,7 @@ fn main() -> Result<()> {
             uart_device: &cli.uart_device,
             skip_uart_config: cli.skip_uart_config,
         },
-        RobotService::new(output, calibration),
+        RobotService::with_scanner(output, calibration, scanner),
     )
 }
 

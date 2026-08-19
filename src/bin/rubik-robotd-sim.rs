@@ -5,7 +5,7 @@ use clap::Parser;
 use rubik_scan::{
     pca9685::PwmOutput,
     robot_daemon::{run_uart_daemon, UartDaemonOptions},
-    robot_service::RobotService,
+    robot_service::{FaceScanner, RobotService},
     stand::StandCalibration,
 };
 use std::path::PathBuf;
@@ -47,8 +47,31 @@ fn main() -> Result<()> {
             uart_device: &cli.uart_device,
             skip_uart_config: cli.skip_uart_config,
         },
-        RobotService::new(output, calibration),
+        RobotService::with_scanner(output, calibration, SimulatedScanner),
     )
+}
+
+struct SimulatedScanner;
+
+impl FaceScanner for SimulatedScanner {
+    fn capture(
+        &mut self,
+        face: rubik_link_protocol::CubeFace,
+    ) -> Result<rubik_link_protocol::RecognizedFace> {
+        use rubik_link_protocol::{CubeFace, StickerColor};
+        let color = match face {
+            CubeFace::Up => StickerColor::White,
+            CubeFace::Right => StickerColor::Red,
+            CubeFace::Front => StickerColor::Green,
+            CubeFace::Down => StickerColor::Yellow,
+            CubeFace::Left => StickerColor::Orange,
+            CubeFace::Back => StickerColor::Blue,
+        };
+        Ok(rubik_link_protocol::RecognizedFace {
+            colors: [color; rubik_link_protocol::STICKERS_PER_FACE],
+            confidence: [255; rubik_link_protocol::STICKERS_PER_FACE],
+        })
+    }
 }
 
 struct SimulatedPwmOutput {
