@@ -6,6 +6,7 @@
 //!   - plane 1: chroma interleaved, width*height/2 bytes
 //!     (NV21: V,U,V,U,... — NV12: U,V,U,V,...; one chroma pair per 2x2
 //!     luma block)
+//!
 //! For 1920x1080 the file must be exactly 1920*1080*1.5 = 3_110_400 bytes
 //! (stride equals width at this resolution).
 //!

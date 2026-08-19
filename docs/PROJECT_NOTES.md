@@ -1325,7 +1325,7 @@ length/stride и pixel format, соответствующим `PIXEL_FORMAT_RGB_
 
 ### 10.22. Правило `unsafe` для Rust/FFI
 
-В проект добавлен `CONTRIBUTING.md` с правилом: scope `unsafe` должен быть
+В проект добавлен `docs/CONTRIBUTING.md` с правилом: scope `unsafe` должен быть
 минимальным. Application code не работает с raw pointers и не вызывает CVI C
 API напрямую. FFI изолируется в небольшом safe Rust wrapper; каждый
 `unsafe` block обязан иметь `SAFETY:` comment с инвариантами lifetime,
@@ -2415,3 +2415,25 @@ pulse. При этом request cache, deadline durations, state transitions и e
 Motion confirmation остаётся на client даже при работе с simulator: клиент не
 должен менять safety policy в зависимости от того, какой daemon сейчас слушает
 UART. На стороне simulator специальное подтверждение не требуется.
+
+#### Protocol-aware ESP32-C6 gateway core
+
+Прозрачный C6 bridge заменён allocation-free gateway state machine в отдельном
+`no_std` crate `crates/rubik-link-gateway`. Gateway валидирует COBS/CRC/version,
+держит bounded normal и priority queues, ставит `Abort` перед normal requests и
+повторяет его каждые 100 ms до response с тем же request ID. Повтор того же
+Abort ID не создаёт ещё одну запись в очереди. Ответы Duo можно извлекать как
+COBS frame для development USB или как transport-neutral packet для будущего
+BLE GATT.
+
+Gateway core подключён к `firmware/esp32c6-controller`: USB Serial/JTAG теперь
+принимает только protocol frames, UART1 сохраняет 115200 baud и прежние pins.
+Строка `rubik-c6 ready` удалена, поскольку текст и binary protocol не должны
+делить один stream. Большой fixed buffer pool размещён в static memory через
+safe `StaticCell::init_with`, а не на stack и не через mutable static/unsafe.
+
+Проверки gateway core покрывают Abort ordering/retry/deduplication, queue limit,
+malformed-frame resynchronization и USB/BLE output forms. C6 firmware успешно
+прошёл `cargo check` для `riscv32imac-unknown-none-elf`. Команды сборки,
+прошивки и quiet smoke test находятся в
+`firmware/esp32c6-controller/README.md`.

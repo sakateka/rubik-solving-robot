@@ -2,7 +2,7 @@
 # Build rubik-scan for Milk-V Duo 256M (SG2002, RISC-V musl).
 #
 # Prerequisite: build_3rd_party + build_tpu_sdk have completed inside the
-# duo-buildroot-sdk-v2 submodule. See PROJECT_NOTES.md, section 10.13.
+# duo-buildroot-sdk-v2 submodule. See docs/PROJECT_NOTES.md, section 10.13.
 set -euo pipefail
 
 project_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -21,7 +21,7 @@ for required in "$cc" "$tpu_sdk_root/include/cviruntime.h" \
                 "$mpi_root/lib/libsns_gc2083.so"; do
   if [[ ! -e "$required" ]]; then
     echo "Missing prerequisite: $required" >&2
-    echo "Build the Duo TPU SDK first; see PROJECT_NOTES.md section 10.13." >&2
+    echo "Build the Duo TPU SDK first; see docs/PROJECT_NOTES.md section 10.13." >&2
     exit 1
   fi
 done

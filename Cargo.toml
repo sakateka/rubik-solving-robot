@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/rubik-link-protocol"]
+members = ["crates/rubik-link-gateway", "crates/rubik-link-protocol"]
 exclude = ["firmware/esp32c6-controller", "duo-buildroot-sdk-v2"]
 resolver = "2"
 

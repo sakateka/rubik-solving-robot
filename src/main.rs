@@ -1,6 +1,6 @@
 //! Rubik's cube face scanner.
 //!
-//! Pipeline (see PROJECT_NOTES.md):
+//! Pipeline (see docs/PROJECT_NOTES.md):
 //!   frame -> letterbox preprocessing -> detector -> NMS -> 3x3 grid -> text.
 //!
 //! Stage 1: PC prototype, reads a photo from disk.

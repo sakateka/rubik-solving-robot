@@ -1,0 +1,8 @@
+[package]
+name = "rubik-link-gateway"
+version = "0.1.0"
+edition = "2021"
+description = "Allocation-free ESP32-C6 packet gateway for the Rubik robot"
+
+[dependencies]
+rubik-link-protocol = { path = "../rubik-link-protocol" }

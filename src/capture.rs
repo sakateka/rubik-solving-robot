@@ -2,7 +2,7 @@
 //!
 //! Stage 1 (PC prototype): read a photo from disk.
 //! Stage 3 (device): capture from GC2083 on Milk-V Duo — vendor VI/VPSS
-//! or v4l2, depending on what the firmware exposes (see PROJECT_NOTES.md, section 9).
+//! or v4l2, depending on what the firmware exposes (see docs/PROJECT_NOTES.md, section 9).
 
 use anyhow::{Context, Result};
 use image::RgbImage;
