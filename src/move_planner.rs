@@ -134,9 +134,8 @@ pub fn optimized_held_steps(moves: &[CubeMove]) -> VecDeque<MovePlanStep> {
 
     while index < moves.len() {
         if matches!(moves[index].face, LogicalFace::Front | LogicalFace::Back) {
-            flush_group(&mut steps, &mut state, AxisGroup::LeftRight);
             flush_group(&mut steps, &mut state, AxisGroup::TopBottom);
-            position_front_back(&mut steps);
+            position_front_back_fused(&mut steps, &mut state);
             while index < moves.len()
                 && matches!(moves[index].face, LogicalFace::Front | LogicalFace::Back)
             {
@@ -150,8 +149,7 @@ pub fn optimized_held_steps(moves: &[CubeMove]) -> VecDeque<MovePlanStep> {
                 steps.push_back(MovePlanStep::MoveCompleted);
                 index += 1;
             }
-            flush_group(&mut steps, &mut state, AxisGroup::LeftRight);
-            restore_front(&mut steps);
+            restore_front_fused(&mut steps, &mut state);
             continue;
         }
 
@@ -406,6 +404,72 @@ fn restore_front(steps: &mut VecDeque<MovePlanStep>) {
     ]);
 }
 
+fn restore_front_fused(steps: &mut VecDeque<MovePlanStep>, state: &mut PlannerState) {
+    use GripperOrientation::{FrameParallel as P, FrameParallelReversed as R};
+
+    reorient_front_fused(steps, state, R, P);
+}
+
+fn position_front_back_fused(
+    steps: &mut VecDeque<MovePlanStep>,
+    state: &mut PlannerState,
+) {
+    use GripperOrientation::{FrameParallel as P, FrameParallelReversed as R};
+
+    if state.dirty_grippers(AxisGroup::LeftRight).is_empty() {
+        position_front_back(steps);
+    } else {
+        reorient_front_fused(steps, state, P, R);
+    }
+}
+
+fn reorient_front_fused(
+    steps: &mut VecDeque<MovePlanStep>,
+    state: &mut PlannerState,
+    top: GripperOrientation,
+    bottom: GripperOrientation,
+) {
+
+    let dirty = state.dirty_grippers(AxisGroup::LeftRight);
+    debug_assert!(!dirty.is_empty());
+    steps.extend([
+        MovePlanStep::SetRails(RailTarget::Pair(RailPair::LeftRight), RailPosition::FarOpen),
+        MovePlanStep::SetGrippers(
+            dirty
+                .iter()
+                .copied()
+                .map(|axis| (axis, GripperOrientation::FramePerpendicular))
+                .collect(),
+        ),
+        MovePlanStep::SetGrippers(vec![
+            (StandAxis::TopGripper, top),
+            (StandAxis::BottomGripper, bottom),
+        ]),
+        MovePlanStep::SetRails(
+            RailTarget::Pair(RailPair::LeftRight),
+            RailPosition::NearGrip,
+        ),
+        MovePlanStep::SetRails(RailTarget::Pair(RailPair::TopBottom), RailPosition::FarOpen),
+        MovePlanStep::SetGrippers(vec![
+            (
+                StandAxis::TopGripper,
+                GripperOrientation::FramePerpendicular,
+            ),
+            (
+                StandAxis::BottomGripper,
+                GripperOrientation::FramePerpendicular,
+            ),
+        ]),
+        MovePlanStep::SetRails(
+            RailTarget::Pair(RailPair::TopBottom),
+            RailPosition::NearGrip,
+        ),
+    ]);
+    for gripper in dirty {
+        state.set_dirty(gripper, false);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -433,7 +497,7 @@ mod tests {
         let optimized = optimized_held_steps(&moves("F B"));
 
         assert_eq!(baseline.len(), 34);
-        assert_eq!(optimized.len(), 19);
+        assert_eq!(optimized.len(), 17);
         assert_eq!(
             optimized
                 .iter()
@@ -441,6 +505,15 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn fuses_dirty_left_right_flush_into_front_back_entry() {
+        let optimized = optimized_held_steps(&moves("R F"));
+
+        assert_eq!(optimized.len(), 18);
+        assert_safe_held_plan(&optimized, 2);
+        assert_decodes_to_moves(&optimized, &moves("R F"));
     }
 
     #[test]

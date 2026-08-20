@@ -28,6 +28,18 @@ Flush = regrip гриппера в perpendicular: open rail → ⊥ → close ra
 
 ## Что делаем
 
+### Статус реализации
+
+- [x] Fused-выход: `flush LR + restore_front` объединены; `F B` сокращён
+  с 19 до 17 шагов.
+- [x] Fused-вход при dirty LR: `flush LR + position_front_back` объединены;
+  переход `R F` сокращён на 2 шага.
+- [x] Добавлены semantic-проверки mapping/направлений и exhaustive safety
+  для всех 4-ходовых последовательностей (104 976 комбинаций).
+- [ ] Frame-tracking через U/D между F/B-блоками.
+- [ ] `Finish::Release` и execute-путь без финального restore/flush.
+- [ ] Cube20 benchmark после завершения оптимизаций.
+
 ### 1. Frame-tracking планировщик
 
 restore_front нужен только для финальной ориентации куба (подтверждено).
@@ -77,7 +89,7 @@ canonical (logical U остаётся на physical Top).
 переориентаций, а `F U B` экономит одну пару.
 Худший случай (F/B строго чередуются с L/R) — не хуже текущего.
 
-### 2. Слияние граничных flush с pf/rf (fused boundaries)
+### 2. Слияние граничных flush с pf/rf (fused boundaries) — реализовано
 
 Сейчас flush_group(LR) закрывает LR, а pf/rf тут же открывают их заново.
 Слияние в один заход:
