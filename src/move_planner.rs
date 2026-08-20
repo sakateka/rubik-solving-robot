@@ -475,6 +475,163 @@ mod tests {
         }
     }
 
+    #[test]
+    fn optimized_plans_preserve_safety_for_all_four_move_sequences() {
+        let all_moves = all_moves();
+
+        for &first in &all_moves {
+            for &second in &all_moves {
+                for &third in &all_moves {
+                    for &fourth in &all_moves {
+                        let moves = [first, second, third, fourth];
+                        let optimized = optimized_held_steps(&moves);
+                        assert_safe_held_plan(&optimized, moves.len());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mechanical_plan_preserves_logical_moves_and_turn_directions() {
+        let all_moves = all_moves();
+
+        for cube_move in all_moves {
+            let moves = [cube_move];
+            assert_decodes_to_moves(&optimized_held_steps(&moves), &moves);
+        }
+
+        for sequence in ["F U B", "F U R", "F R B", "F U D B"] {
+            let moves = moves(sequence);
+            assert_decodes_to_moves(&optimized_held_steps(&moves), &moves);
+        }
+    }
+
+    fn all_moves() -> Vec<CubeMove> {
+        LogicalFace::ALL
+            .into_iter()
+            .flat_map(|face| {
+                [
+                    MoveTurn::Clockwise,
+                    MoveTurn::CounterClockwise,
+                    MoveTurn::Half,
+                ]
+                .map(move |turn| CubeMove { face, turn })
+            })
+            .collect()
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum TestFrame {
+        Canonical,
+        RotatedFb,
+    }
+
+    fn assert_decodes_to_moves(steps: &VecDeque<MovePlanStep>, expected: &[CubeMove]) {
+        use GripperOrientation::{FrameParallel, FrameParallelReversed};
+
+        let mut rails = [RailPosition::NearGrip; 4];
+        let mut frame = TestFrame::Canonical;
+        let mut parallel_events = Vec::new();
+        let mut decoded = Vec::new();
+
+        for step in steps {
+            match step {
+                MovePlanStep::SetRails(target, position) => match target {
+                    RailTarget::Pair(RailPair::LeftRight) => {
+                        rails[0] = *position;
+                        rails[1] = *position;
+                    }
+                    RailTarget::Pair(RailPair::TopBottom) => {
+                        rails[2] = *position;
+                        rails[3] = *position;
+                    }
+                    RailTarget::Single(axis) => rails[axis_index(*axis)] = *position,
+                },
+                MovePlanStep::SetGrippers(poses) => {
+                    let is_whole_cube_reorientation = poses.len() == 2
+                        && poses.iter().all(|(axis, orientation)| {
+                            matches!(
+                                axis,
+                                StandAxis::TopGripper | StandAxis::BottomGripper
+                            ) && orientation.is_frame_parallel()
+                        });
+
+                    if is_whole_cube_reorientation {
+                        assert_eq!(
+                            rails[0],
+                            RailPosition::FarOpen,
+                            "cube rotation must happen while LR rails are open"
+                        );
+                        let top = poses
+                            .iter()
+                            .find(|(axis, _)| *axis == StandAxis::TopGripper)
+                            .map(|(_, orientation)| *orientation)
+                            .unwrap();
+                        let bottom = poses
+                            .iter()
+                            .find(|(axis, _)| *axis == StandAxis::BottomGripper)
+                            .map(|(_, orientation)| *orientation)
+                            .unwrap();
+
+                        frame = match (top, bottom) {
+                            (FrameParallel, FrameParallelReversed) => TestFrame::RotatedFb,
+                            (FrameParallelReversed, FrameParallel) => TestFrame::Canonical,
+                            orientations => panic!(
+                                "unexpected whole-cube orientation pair: {orientations:?}"
+                            ),
+                        };
+                    } else {
+                        parallel_events.extend(
+                            poses
+                                .iter()
+                                .filter(|(_, orientation)| orientation.is_frame_parallel())
+                                .copied(),
+                        );
+                    }
+                }
+                MovePlanStep::MoveCompleted => {
+                    let (axis, turn) = match parallel_events.as_slice() {
+                        [(axis, FrameParallel)] => (*axis, MoveTurn::CounterClockwise),
+                        [(axis, FrameParallelReversed)] => (*axis, MoveTurn::Clockwise),
+                        [
+                            (axis @ _, FrameParallel),
+                            (same_axis, FrameParallelReversed),
+                        ] if axis == same_axis => (*axis, MoveTurn::Half),
+                        events => panic!(
+                            "expected one quarter-turn or two half-turn events before marker, got {events:?}"
+                        ),
+                    };
+                    decoded.push(CubeMove {
+                        face: logical_face(frame, axis),
+                        turn,
+                    });
+                    parallel_events.clear();
+                }
+                MovePlanStep::AllOff => panic!("held plan must not disable outputs"),
+            }
+        }
+
+        assert!(
+            parallel_events.is_empty(),
+            "plan ended with an uncompleted mechanical turn: {parallel_events:?}"
+        );
+        assert_eq!(decoded, expected);
+        assert_eq!(frame, TestFrame::Canonical);
+    }
+
+    fn logical_face(frame: TestFrame, gripper: StandAxis) -> LogicalFace {
+        match (frame, gripper) {
+            (_, StandAxis::TopGripper) => LogicalFace::Up,
+            (_, StandAxis::BottomGripper) => LogicalFace::Down,
+            (TestFrame::Canonical, StandAxis::LeftGripper) => LogicalFace::Left,
+            (TestFrame::Canonical, StandAxis::RightGripper) => LogicalFace::Right,
+            (TestFrame::RotatedFb, StandAxis::LeftGripper) => LogicalFace::Back,
+            (TestFrame::RotatedFb, StandAxis::RightGripper) => LogicalFace::Front,
+            (_, axis) => panic!("rail is not a gripper: {axis:?}"),
+        }
+    }
+
     fn assert_safe_held_plan(steps: &VecDeque<MovePlanStep>, expected_moves: usize) {
         let mut rails = [RailPosition::NearGrip; 4];
         let mut grippers = [GripperOrientation::FramePerpendicular; 4];
