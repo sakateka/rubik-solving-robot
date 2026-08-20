@@ -141,37 +141,45 @@ enum Finish {
     Release,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Frame {
+    Canonical,
+    RotatedFb,
+}
+
 fn optimized_steps(moves: &[CubeMove], finish: Finish) -> VecDeque<MovePlanStep> {
     let mut steps = VecDeque::new();
     let mut state = PlannerState::default();
-    let mut index = 0;
+    let mut frame = Frame::Canonical;
 
-    while index < moves.len() {
-        if matches!(moves[index].face, LogicalFace::Front | LogicalFace::Back) {
+    for &cube_move in moves {
+        if frame == Frame::Canonical
+            && matches!(cube_move.face, LogicalFace::Front | LogicalFace::Back)
+        {
             flush_group(&mut steps, &mut state, AxisGroup::TopBottom);
             position_front_back_fused(&mut steps, &mut state);
-            while index < moves.len()
-                && matches!(moves[index].face, LogicalFace::Front | LogicalFace::Back)
-            {
-                let cube_move = moves[index];
-                let (gripper, rail) = match cube_move.face {
-                    LogicalFace::Front => (StandAxis::RightGripper, StandAxis::RightRail),
-                    LogicalFace::Back => (StandAxis::LeftGripper, StandAxis::LeftRail),
-                    _ => unreachable!(),
-                };
-                lazy_direct_turn(&mut steps, &mut state, gripper, rail, cube_move.turn);
-                steps.push_back(MovePlanStep::MoveCompleted);
-                index += 1;
-            }
-            if index == moves.len() && finish == Finish::Release {
-                break;
-            }
+            frame = Frame::RotatedFb;
+        } else if frame == Frame::RotatedFb
+            && matches!(cube_move.face, LogicalFace::Left | LogicalFace::Right)
+        {
+            flush_group(&mut steps, &mut state, AxisGroup::TopBottom);
             restore_front_fused(&mut steps, &mut state);
-            continue;
+            frame = Frame::Canonical;
         }
 
-        let cube_move = moves[index];
-        let (group, gripper, rail) = direct_axis(cube_move.face);
+        let (group, gripper, rail) = match (frame, cube_move.face) {
+            (Frame::RotatedFb, LogicalFace::Front) => (
+                AxisGroup::LeftRight,
+                StandAxis::RightGripper,
+                StandAxis::RightRail,
+            ),
+            (Frame::RotatedFb, LogicalFace::Back) => (
+                AxisGroup::LeftRight,
+                StandAxis::LeftGripper,
+                StandAxis::LeftRail,
+            ),
+            _ => direct_axis(cube_move.face),
+        };
         let other = match group {
             AxisGroup::LeftRight => AxisGroup::TopBottom,
             AxisGroup::TopBottom => AxisGroup::LeftRight,
@@ -179,10 +187,13 @@ fn optimized_steps(moves: &[CubeMove], finish: Finish) -> VecDeque<MovePlanStep>
         flush_group(&mut steps, &mut state, other);
         lazy_direct_turn(&mut steps, &mut state, gripper, rail, cube_move.turn);
         steps.push_back(MovePlanStep::MoveCompleted);
-        index += 1;
     }
 
     if finish == Finish::CanonicalHeld {
+        if frame == Frame::RotatedFb {
+            flush_group(&mut steps, &mut state, AxisGroup::TopBottom);
+            restore_front_fused(&mut steps, &mut state);
+        }
         flush_group(&mut steps, &mut state, AxisGroup::LeftRight);
         flush_group(&mut steps, &mut state, AxisGroup::TopBottom);
     }
@@ -426,7 +437,11 @@ fn restore_front(steps: &mut VecDeque<MovePlanStep>) {
 fn restore_front_fused(steps: &mut VecDeque<MovePlanStep>, state: &mut PlannerState) {
     use GripperOrientation::{FrameParallel as P, FrameParallelReversed as R};
 
-    reorient_front_fused(steps, state, R, P);
+    if state.dirty_grippers(AxisGroup::LeftRight).is_empty() {
+        restore_front(steps);
+    } else {
+        reorient_front_fused(steps, state, R, P);
+    }
 }
 
 fn position_front_back_fused(steps: &mut VecDeque<MovePlanStep>, state: &mut PlannerState) {
@@ -539,6 +554,31 @@ mod tests {
         let front = optimized_execute_steps(&moves("F"));
         assert_eq!(front.len(), 8);
         assert!(matches!(front.back(), Some(MovePlanStep::MoveCompleted)));
+    }
+
+    #[test]
+    fn keeps_rotated_frame_across_up_down_moves() {
+        let bridged = optimized_held_steps(&moves("F U B"));
+        let interrupted = optimized_held_steps(&moves("F R B"));
+
+        assert_eq!(whole_cube_turn_count(&bridged), 2);
+        assert_eq!(whole_cube_turn_count(&interrupted), 4);
+    }
+
+    fn whole_cube_turn_count(steps: &VecDeque<MovePlanStep>) -> usize {
+        steps
+            .iter()
+            .filter(|step| match step {
+                MovePlanStep::SetGrippers(poses) => {
+                    poses.len() == 2
+                        && poses.iter().all(|(axis, orientation)| {
+                            matches!(axis, StandAxis::TopGripper | StandAxis::BottomGripper)
+                                && orientation.is_frame_parallel()
+                        })
+                }
+                _ => false,
+            })
+            .count()
     }
 
     #[test]

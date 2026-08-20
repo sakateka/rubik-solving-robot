@@ -36,7 +36,7 @@ Flush = regrip гриппера в perpendicular: open rail → ⊥ → close ra
   переход `R F` сокращён на 2 шага.
 - [x] Добавлены semantic-проверки mapping/направлений и exhaustive safety
   для всех 4-ходовых последовательностей (104 976 комбинаций).
-- [ ] Frame-tracking через U/D между F/B-блоками.
+- [x] Frame-tracking через U/D между F/B-блоками.
 - [x] `Finish::Release` и execute-путь без финального restore/flush.
 - [ ] Cube20 benchmark после завершения оптимизаций.
 
