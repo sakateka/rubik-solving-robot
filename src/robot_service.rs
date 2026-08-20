@@ -10,6 +10,7 @@ use crate::{
         parse_solution, solve_facelets, CubeMove, CubeState, Face, LogicalFace, MoveTurn,
         QuarterTurns, ScanPose,
     },
+    move_planner::{append_open_steps, optimized_held_steps, MovePlanStep, RailPair, RailTarget},
     pca9685::PwmOutput,
     robot_link::{FrameEncodeError, ReceivedPacket, UartFrameEncoder},
     stand::{GripperOrientation, RailPosition, StandAxis, StandCalibration},
@@ -186,18 +187,6 @@ struct ActiveMotion {
     kind: link::OperationKind,
     phase: MotionPhase,
     deadline: Option<Instant>,
-}
-
-#[derive(Clone, Copy, Debug)]
-enum RailPair {
-    LeftRight,
-    TopBottom,
-}
-
-#[derive(Clone, Debug)]
-enum RailTarget {
-    Pair(RailPair),
-    Single(StandAxis),
 }
 
 #[derive(Clone, Debug)]
@@ -1290,8 +1279,8 @@ where
                         self.status.solution.completed_moves.saturating_add(1);
                 }
                 self.status.stand.pose = link::StandPose {
-                    kind: link::StandPoseKind::CanonicalGrip,
-                    camera_face: Some(link::CubeFace::Front),
+                    kind: link::StandPoseKind::MovePose,
+                    camera_face: None,
                 };
                 self.advance_action_counter();
                 self.emit_stand();
@@ -1852,191 +1841,30 @@ fn internal_move(cube_move: link::CubeMove) -> CubeMove {
 }
 
 fn execute_steps(moves: &[CubeMove]) -> VecDeque<MotionStep> {
-    let mut steps = held_execute_steps(moves);
-    steps.extend(open_steps());
-    steps
+    let mut plan = optimized_held_steps(moves);
+    append_open_steps(&mut plan);
+    motion_steps(plan)
 }
 
 fn held_execute_steps(moves: &[CubeMove]) -> VecDeque<MotionStep> {
-    let mut steps = VecDeque::new();
-    for &cube_move in moves {
-        match cube_move.face {
-            LogicalFace::Left => direct_turn_steps(
-                &mut steps,
-                StandAxis::LeftGripper,
-                StandAxis::LeftRail,
-                cube_move.turn,
-            ),
-            LogicalFace::Right => direct_turn_steps(
-                &mut steps,
-                StandAxis::RightGripper,
-                StandAxis::RightRail,
-                cube_move.turn,
-            ),
-            LogicalFace::Up => direct_turn_steps(
-                &mut steps,
-                StandAxis::TopGripper,
-                StandAxis::TopRail,
-                cube_move.turn,
-            ),
-            LogicalFace::Down => direct_turn_steps(
-                &mut steps,
-                StandAxis::BottomGripper,
-                StandAxis::BottomRail,
-                cube_move.turn,
-            ),
-            LogicalFace::Front => {
-                position_front_back_steps(&mut steps);
-                direct_turn_steps(
-                    &mut steps,
-                    StandAxis::RightGripper,
-                    StandAxis::RightRail,
-                    cube_move.turn,
-                );
-                restore_front_steps(&mut steps);
-            }
-            LogicalFace::Back => {
-                position_front_back_steps(&mut steps);
-                direct_turn_steps(
-                    &mut steps,
-                    StandAxis::LeftGripper,
-                    StandAxis::LeftRail,
-                    cube_move.turn,
-                );
-                restore_front_steps(&mut steps);
-            }
-        }
-        steps.push_back(MotionStep::MoveCompleted);
-    }
-    steps
+    motion_steps(optimized_held_steps(moves))
 }
 
 fn open_steps() -> VecDeque<MotionStep> {
-    VecDeque::from([
-        MotionStep::SetRails(RailTarget::Pair(RailPair::LeftRight), RailPosition::FarOpen),
-        MotionStep::SetRails(RailTarget::Pair(RailPair::TopBottom), RailPosition::FarOpen),
-        MotionStep::AllOff,
-    ])
+    let mut plan = VecDeque::new();
+    append_open_steps(&mut plan);
+    motion_steps(plan)
 }
 
-fn direct_turn_steps(
-    steps: &mut VecDeque<MotionStep>,
-    gripper: StandAxis,
-    rail: StandAxis,
-    turn: MoveTurn,
-) {
-    match turn {
-        MoveTurn::Clockwise => steps.push_back(MotionStep::SetGrippers(vec![(
-            gripper,
-            GripperOrientation::FrameParallelReversed,
-        )])),
-        MoveTurn::CounterClockwise => steps.push_back(MotionStep::SetGrippers(vec![(
-            gripper,
-            GripperOrientation::FrameParallel,
-        )])),
-        MoveTurn::Half => {
-            steps.push_back(MotionStep::SetRails(
-                RailTarget::Single(rail),
-                RailPosition::FarOpen,
-            ));
-            steps.push_back(MotionStep::SetGrippers(vec![(
-                gripper,
-                GripperOrientation::FrameParallel,
-            )]));
-            steps.push_back(MotionStep::SetRails(
-                RailTarget::Single(rail),
-                RailPosition::NearGrip,
-            ));
-            steps.push_back(MotionStep::SetGrippers(vec![(
-                gripper,
-                GripperOrientation::FrameParallelReversed,
-            )]));
-        }
-    }
-    steps.push_back(MotionStep::SetRails(
-        RailTarget::Single(rail),
-        RailPosition::FarOpen,
-    ));
-    steps.push_back(MotionStep::SetGrippers(vec![(
-        gripper,
-        GripperOrientation::FramePerpendicular,
-    )]));
-    steps.push_back(MotionStep::SetRails(
-        RailTarget::Single(rail),
-        RailPosition::NearGrip,
-    ));
-}
-
-fn position_front_back_steps(steps: &mut VecDeque<MotionStep>) {
-    steps.push_back(MotionStep::SetRails(
-        RailTarget::Pair(RailPair::LeftRight),
-        RailPosition::FarOpen,
-    ));
-    steps.push_back(MotionStep::SetGrippers(vec![
-        (StandAxis::TopGripper, GripperOrientation::FrameParallel),
-        (
-            StandAxis::BottomGripper,
-            GripperOrientation::FrameParallelReversed,
-        ),
-    ]));
-    steps.push_back(MotionStep::SetRails(
-        RailTarget::Pair(RailPair::LeftRight),
-        RailPosition::NearGrip,
-    ));
-    steps.push_back(MotionStep::SetRails(
-        RailTarget::Pair(RailPair::TopBottom),
-        RailPosition::FarOpen,
-    ));
-    steps.push_back(MotionStep::SetGrippers(vec![
-        (
-            StandAxis::TopGripper,
-            GripperOrientation::FramePerpendicular,
-        ),
-        (
-            StandAxis::BottomGripper,
-            GripperOrientation::FramePerpendicular,
-        ),
-    ]));
-    steps.push_back(MotionStep::SetRails(
-        RailTarget::Pair(RailPair::TopBottom),
-        RailPosition::NearGrip,
-    ));
-}
-
-fn restore_front_steps(steps: &mut VecDeque<MotionStep>) {
-    steps.push_back(MotionStep::SetRails(
-        RailTarget::Pair(RailPair::LeftRight),
-        RailPosition::FarOpen,
-    ));
-    steps.push_back(MotionStep::SetGrippers(vec![
-        (
-            StandAxis::TopGripper,
-            GripperOrientation::FrameParallelReversed,
-        ),
-        (StandAxis::BottomGripper, GripperOrientation::FrameParallel),
-    ]));
-    steps.push_back(MotionStep::SetRails(
-        RailTarget::Pair(RailPair::LeftRight),
-        RailPosition::NearGrip,
-    ));
-    steps.push_back(MotionStep::SetRails(
-        RailTarget::Pair(RailPair::TopBottom),
-        RailPosition::FarOpen,
-    ));
-    steps.push_back(MotionStep::SetGrippers(vec![
-        (
-            StandAxis::TopGripper,
-            GripperOrientation::FramePerpendicular,
-        ),
-        (
-            StandAxis::BottomGripper,
-            GripperOrientation::FramePerpendicular,
-        ),
-    ]));
-    steps.push_back(MotionStep::SetRails(
-        RailTarget::Pair(RailPair::TopBottom),
-        RailPosition::NearGrip,
-    ));
+fn motion_steps(plan: VecDeque<MovePlanStep>) -> VecDeque<MotionStep> {
+    plan.into_iter()
+        .map(|step| match step {
+            MovePlanStep::SetRails(target, position) => MotionStep::SetRails(target, position),
+            MovePlanStep::SetGrippers(poses) => MotionStep::SetGrippers(poses),
+            MovePlanStep::MoveCompleted => MotionStep::MoveCompleted,
+            MovePlanStep::AllOff => MotionStep::AllOff,
+        })
+        .collect()
 }
 
 fn logical_face(face: link::CubeFace) -> LogicalFace {
@@ -2714,20 +2542,20 @@ mod tests {
 
         let messages = service.handle_packet(&execute_packet(1, 1, 1, 4), base);
         assert_eq!(accepted_operation(&messages), 3);
-        let mut saw_completed_move_in_canonical_grip = false;
+        let mut saw_completed_move_in_move_pose = false;
         for step in 0..100 {
             service.tick(base + std::time::Duration::from_secs(20 + step));
             if service.status().solution.completed_moves == 1
-                && service.status().stand.pose.kind == link::StandPoseKind::CanonicalGrip
+                && service.status().stand.pose.kind == link::StandPoseKind::MovePose
             {
-                saw_completed_move_in_canonical_grip = true;
+                saw_completed_move_in_move_pose = true;
             }
             if service.status().active_operation.is_none() {
                 break;
             }
         }
 
-        assert!(saw_completed_move_in_canonical_grip);
+        assert!(saw_completed_move_in_move_pose);
         assert_eq!(service.status().controller, link::ControllerState::Ready);
         assert_eq!(service.status().stand.pose.kind, link::StandPoseKind::Open);
         assert!(!service.status().stand.outputs_enabled);
@@ -2857,13 +2685,67 @@ mod tests {
     }
 
     #[test]
+    fn manual_opposite_faces_share_one_regrip() {
+        let base = Instant::now();
+        let mut service = RobotService::with_scanner(
+            MockOutput::default(),
+            StandCalibration::default(),
+            SolvedScanner,
+        );
+        recover_and_grip(&mut service, base);
+        let writes_before_execute = service.output.sets.len();
+
+        let messages = service.handle_packet(
+            &execute_moves_packet(
+                1,
+                &[
+                    link::CubeMove {
+                        face: link::CubeFace::Right,
+                        turn: link::TurnAmount::Clockwise,
+                    },
+                    link::CubeMove {
+                        face: link::CubeFace::Left,
+                        turn: link::TurnAmount::Clockwise,
+                    },
+                ],
+                4,
+            ),
+            base,
+        );
+        assert_eq!(accepted_operation(&messages), 3);
+        assert_eq!(service.status().active_operation.unwrap().action_count, 7);
+        for step in 0..100 {
+            service.tick(base + std::time::Duration::from_secs(20 + step));
+            if service.status().active_operation.is_none() {
+                break;
+            }
+        }
+
+        assert_eq!(
+            service.status().stand.pose.kind,
+            link::StandPoseKind::CanonicalGrip
+        );
+        assert_eq!(
+            &service.output.sets[writes_before_execute..],
+            &[
+                vec![(0, 2500)],
+                vec![(3, 2450)],
+                vec![(5, 2500), (7, 2500)],
+                vec![(3, 1450), (0, 1500)],
+                vec![(5, 1200), (7, 1200)],
+            ]
+        );
+    }
+
+    #[test]
     fn front_half_turn_plan_contains_both_whole_cube_regrips() {
         let steps = execute_steps(&[CubeMove {
             face: LogicalFace::Front,
             turn: MoveTurn::Half,
         }]);
 
-        // 6 position + 7 half-turn + 6 restore + move marker + 3 normal-open.
+        // 6 position + 4 half-turn + marker + 3 shared canonicalization +
+        // 6 restore + 3 normal-open.
         assert_eq!(steps.len(), 23);
         assert!(matches!(
             steps[0],
@@ -2877,10 +2759,10 @@ mod tests {
             )
         ));
         assert!(matches!(
-            steps[13],
+            steps[14],
             MotionStep::SetRails(RailTarget::Pair(RailPair::LeftRight), RailPosition::FarOpen)
         ));
-        assert!(matches!(steps[19], MotionStep::MoveCompleted));
+        assert!(matches!(steps[10], MotionStep::MoveCompleted));
         assert!(matches!(steps[22], MotionStep::AllOff));
     }
 
@@ -2919,8 +2801,6 @@ mod tests {
                 }
                 MotionStep::MoveCompleted => {
                     saw_move_boundary = true;
-                    assert_eq!(rails, [RailPosition::NearGrip; 4]);
-                    assert_eq!(grippers, [GripperOrientation::FramePerpendicular; 4]);
                 }
                 MotionStep::AllOff => {}
                 MotionStep::Capture(_) => panic!("execute plan must not capture"),

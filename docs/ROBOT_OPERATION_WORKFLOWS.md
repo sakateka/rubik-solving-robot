@@ -86,8 +86,10 @@ grip sequence completed; it is not an independent physical measurement.
 
 `ExecuteMoves` accepts a bounded Singmaster sequence for the current session.
 The executor starts in `CanonicalGrip`, performs each logical move through the
-validated mechanical primitive, and returns to `CanonicalGrip` after every
-move. Temporary whole-cube reorientation for `F/B` is never exposed as a
+validated mechanical primitives, and returns to `CanonicalGrip` after the
+complete sequence. Between compatible opposite-face moves, the planner may
+keep one axis pair in `MovePose` and defer its shared regrip. Temporary
+whole-cube reorientation for a contiguous `F/B` block is never exposed as a
 logical change of cube orientation.
 
 After the first successful manual move, existing scan and solution data is
@@ -131,9 +133,10 @@ solution ID
 ```
 
 Execution publishes logical moves and a bounded preview of semantic mechanical
-actions. Each move returns the stand to canonical grip. After the final move,
-the robot performs the normal orientation-preserving open sequence and ends
-the session.
+actions. `MoveCompleted` advances logical progress, while compatible moves may
+share a non-canonical mechanical holding mode. After the final move, the
+planner restores canonical grip, performs the normal orientation-preserving
+open sequence and ends the session.
 
 The normal mobile workflow can present `Solve` and `Execute` as one “Solve
 cube” action while retaining separate protocol commands for diagnostics.
