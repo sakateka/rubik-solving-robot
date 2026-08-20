@@ -2818,3 +2818,15 @@ Duo принимает команду только для текущей cube se
 собирают редактируемую строку; доступны Undo, Clear и Execute. Сервер повторно
 парсит строку, поэтому ручное редактирование в браузере не обходит protocol
 validation.
+
+Host-side `rubik-robotctl` также поддерживает ручную последовательность через
+USB Serial/JTAG:
+
+```sh
+./target/debug/rubik-robotctl --confirm-stand-motion moves --session 1 "U' F B R2"
+```
+
+CLI использует тот же `parse_singmaster`, что и C6 HTTP endpoint, поэтому
+браузер и диагностический клиент отправляют одинаковый binary command. После
+приёма команда ждёт `OperationCompleted`; session остаётся захваченной в
+`CanonicalGrip`.

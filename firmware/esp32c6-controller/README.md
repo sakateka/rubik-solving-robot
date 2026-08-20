@@ -161,6 +161,7 @@ Run `rubik-robotd-sim` on Duo, then execute on the C6 development host:
 rubik-robotctl status
 rubik-robotctl --confirm-stand-motion recover
 rubik-robotctl --confirm-stand-motion grip
+rubik-robotctl --confirm-stand-motion moves --session 1 "U' F B R2"
 rubik-robotctl abort
 ```
 

@@ -40,7 +40,7 @@ struct Cli {
     command: ControlCommand,
 }
 
-#[derive(Clone, Copy, Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 enum ControlCommand {
     /// Read the authoritative robot status without moving anything.
     Status,
@@ -50,29 +50,41 @@ enum ControlCommand {
     Grip,
     /// Immediately disable PWM and cancel the active operation.
     Abort,
+    /// Execute a manual Singmaster sequence while keeping the cube gripped.
+    Moves {
+        /// Current cube session ID from `status`.
+        #[arg(long, alias = "session-id")]
+        session: u32,
+        /// Whitespace-separated Singmaster sequence, for example `U' F B R2`.
+        sequence: String,
+    },
 }
 
 impl ControlCommand {
-    const fn protocol_command(self) -> ClientCommand {
+    fn protocol_command(&self) -> Result<ClientCommand> {
         match self {
-            Self::Status => ClientCommand::GetStatus,
-            Self::Recover => ClientCommand::RecoverToOpen,
-            Self::Grip => ClientCommand::Grip,
-            Self::Abort => ClientCommand::Abort,
+            Self::Status => Ok(ClientCommand::GetStatus),
+            Self::Recover => Ok(ClientCommand::RecoverToOpen),
+            Self::Grip => Ok(ClientCommand::Grip),
+            Self::Abort => Ok(ClientCommand::Abort),
+            Self::Moves { session, sequence } => Ok(ClientCommand::ExecuteMoves(parse_moves(
+                *session, sequence,
+            )?)),
         }
     }
 
-    const fn may_move_stand(self) -> bool {
-        matches!(self, Self::Recover | Self::Grip)
+    const fn may_move_stand(&self) -> bool {
+        matches!(self, Self::Recover | Self::Grip | Self::Moves { .. })
     }
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    if cli.command.may_move_stand() && !cli.confirm_stand_motion {
+    let command = cli.command;
+    if command.may_move_stand() && !cli.confirm_stand_motion {
         bail!(
             "{} may move the stand; pass --confirm-stand-motion after checking it",
-            command_name(cli.command)
+            command_name(&command)
         );
     }
     if !cli.skip_serial_config {
@@ -95,7 +107,7 @@ fn main() -> Result<()> {
     let receiver = spawn_reader(reader);
     let mut writer = serial;
     let mut client = RobotClient::with_initial_request_id(initial_request_id());
-    let request = client.encode_command(cli.command.protocol_command())?;
+    let request = client.encode_command(command.protocol_command()?)?;
     let request_id = request.request_id;
     let frame = request.frame.to_vec();
     send_frame(&mut writer, &frame)?;
@@ -106,7 +118,7 @@ fn main() -> Result<()> {
         &mut client,
         &frame,
         request_id,
-        cli.command,
+        command,
         cli.timeout,
     )
 }
@@ -174,7 +186,7 @@ fn wait_for_result(
                 ClientMessage::Response(ClientResponse::Status {
                     request_id: response_id,
                     ..
-                }) if *response_id == request_id && matches!(command, ControlCommand::Status) => {
+                }) if *response_id == request_id && matches!(&command, ControlCommand::Status) => {
                     return Ok(())
                 }
                 ClientMessage::Response(ClientResponse::Rejected {
@@ -193,7 +205,8 @@ fn wait_for_result(
                 }) if *response_id == request_id => {
                     response_received = true;
                     accepted_operation = payload.operation_id;
-                    if payload.operation_id.is_none() && !matches!(command, ControlCommand::Abort) {
+                    if payload.operation_id.is_none() && !matches!(&command, ControlCommand::Abort)
+                    {
                         return Ok(());
                     }
                 }
@@ -203,7 +216,7 @@ fn wait_for_result(
                     return Ok(())
                 }
                 ClientMessage::Event(ClientEvent::Aborted(_))
-                    if matches!(command, ControlCommand::Abort) =>
+                    if matches!(&command, ControlCommand::Abort) =>
                 {
                     return Ok(())
                 }
@@ -448,12 +461,30 @@ fn optional_number(value: Option<u32>) -> String {
         .unwrap_or_else(|| "—".into())
 }
 
-const fn command_name(command: ControlCommand) -> &'static str {
+fn parse_moves(session: u32, sequence: &str) -> Result<link::ExecuteMovesCommand> {
+    let (moves, move_count) = link::parse_singmaster(sequence).map_err(|error| match error {
+        link::SingmasterError::Empty => anyhow::anyhow!("move sequence is empty"),
+        link::SingmasterError::TooManyMoves => {
+            anyhow::anyhow!("move sequence exceeds {} moves", link::MAX_SOLUTION_MOVES)
+        }
+        link::SingmasterError::InvalidToken { index } => {
+            anyhow::anyhow!("invalid Singmaster move at token {index}")
+        }
+    })?;
+    Ok(link::ExecuteMovesCommand {
+        session_id: session,
+        moves,
+        move_count,
+    })
+}
+
+const fn command_name(command: &ControlCommand) -> &'static str {
     match command {
         ControlCommand::Status => "status",
         ControlCommand::Recover => "recover",
         ControlCommand::Grip => "grip",
         ControlCommand::Abort => "abort",
+        ControlCommand::Moves { .. } => "moves",
     }
 }
 
@@ -494,4 +525,26 @@ fn spawn_reader(mut reader: File) -> mpsc::Receiver<std::io::Result<Vec<u8>>> {
         }
     });
     receiver
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_manual_moves_for_the_protocol() {
+        let command = parse_moves(7, "U' F B R2").unwrap();
+        assert_eq!(command.session_id, 7);
+        assert_eq!(command.move_count, 4);
+        assert_eq!(command.moves[0].face, link::CubeFace::Up);
+        assert_eq!(command.moves[0].turn, link::TurnAmount::CounterClockwise);
+        assert_eq!(command.moves[3].face, link::CubeFace::Right);
+        assert_eq!(command.moves[3].turn, link::TurnAmount::Half);
+    }
+
+    #[test]
+    fn rejects_invalid_manual_move_text() {
+        assert!(parse_moves(7, "U X").is_err());
+        assert!(parse_moves(7, "").is_err());
+    }
 }
