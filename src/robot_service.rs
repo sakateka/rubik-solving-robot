@@ -10,7 +10,10 @@ use crate::{
         parse_solution, solve_facelets, CubeMove, CubeState, Face, LogicalFace, MoveTurn,
         QuarterTurns, ScanPose,
     },
-    move_planner::{append_open_steps, optimized_held_steps, MovePlanStep, RailPair, RailTarget},
+    move_planner::{
+        append_open_steps, optimized_execute_steps, optimized_held_steps, MovePlanStep, RailPair,
+        RailTarget,
+    },
     pca9685::PwmOutput,
     robot_link::{FrameEncodeError, ReceivedPacket, UartFrameEncoder},
     stand::{GripperOrientation, RailPosition, StandAxis, StandCalibration},
@@ -1841,7 +1844,7 @@ fn internal_move(cube_move: link::CubeMove) -> CubeMove {
 }
 
 fn execute_steps(moves: &[CubeMove]) -> VecDeque<MotionStep> {
-    let mut plan = optimized_held_steps(moves);
+    let mut plan = optimized_execute_steps(moves);
     append_open_steps(&mut plan);
     motion_steps(plan)
 }
@@ -2569,9 +2572,6 @@ mod tests {
             &service.output.sets[writes_before_execute..],
             &[
                 vec![(0, 2500)],
-                vec![(7, 2500)],
-                vec![(0, 1500)],
-                vec![(7, 1200)],
                 vec![(5, 2500), (7, 2500)],
                 vec![(4, 2500), (6, 2500)],
             ]
@@ -2744,9 +2744,9 @@ mod tests {
             turn: MoveTurn::Half,
         }]);
 
-        // 6 position + 4 half-turn + marker + 3 shared canonicalization +
-        // 6 restore + 3 normal-open.
-        assert_eq!(steps.len(), 23);
+        // 6 position + 4 half-turn + marker + 3 normal-open. Release finish
+        // intentionally skips canonicalization and restore.
+        assert_eq!(steps.len(), 14);
         assert!(matches!(
             steps[0],
             MotionStep::SetRails(RailTarget::Pair(RailPair::LeftRight), RailPosition::FarOpen)
@@ -2758,12 +2758,8 @@ mod tests {
                 RailPosition::FarOpen
             )
         ));
-        assert!(matches!(
-            steps[14],
-            MotionStep::SetRails(RailTarget::Pair(RailPair::LeftRight), RailPosition::FarOpen)
-        ));
         assert!(matches!(steps[10], MotionStep::MoveCompleted));
-        assert!(matches!(steps[22], MotionStep::AllOff));
+        assert!(matches!(steps[13], MotionStep::AllOff));
     }
 
     #[test]

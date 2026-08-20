@@ -2853,8 +2853,8 @@ CLI использует тот же `parse_singmaster`, что и C6 HTTP endpo
   `F/B`, затем один раз вернуть исходный Front;
 - перед переходом между `L/R` и `U/D` обязательно канонизировать предыдущую
   пару, потому что соседние parallel grippers при закрытых rails запрещены;
-- завершать и manual `ExecuteMoves`, и solver `Execute` в прежнем контрактном
-  состоянии; normal `Execute` после этого выполняет open.
+- завершать manual `ExecuteMoves` в прежнем canonical-состоянии; solver
+  `Execute` сразу выполняет open без лишнего финального flush/restore.
 
 Оптимизация должна быть измеримой до проверки на стенде. Для этого нужен
 dry-run binary, который для одной Singmaster sequence печатает baseline и
@@ -2885,9 +2885,9 @@ cargo run --features pca9685 --bin rubik-move-plan -- "F B R2 U' L"
 
 `MoveCompleted` теперь отмечает завершение логического поворота, а не
 обязательную canonical boundary. Пока следующая совместимая грань использует
-тот же holding mode, status остаётся `MovePose`. После общей канонизации manual
-операция публикует `CanonicalGrip`; solver execution затем выполняет normal
-open как раньше.
+тот же holding mode, status остаётся `MovePose`. Manual-операция завершает
+общую канонизацию и публикует `CanonicalGrip`; solver execution сразу открывает
+стенд из текущего безопасного состояния.
 
 Алгебраическое сокращение (`R R → R2`, `R R' → ∅`) пока намеренно не включено:
 planner сохраняет один `MoveCompleted` на каждый входной ход, поэтому solution

@@ -128,6 +128,20 @@ pub fn baseline_held_steps(moves: &[CubeMove]) -> VecDeque<MovePlanStep> {
 }
 
 pub fn optimized_held_steps(moves: &[CubeMove]) -> VecDeque<MovePlanStep> {
+    optimized_steps(moves, Finish::CanonicalHeld)
+}
+
+pub fn optimized_execute_steps(moves: &[CubeMove]) -> VecDeque<MovePlanStep> {
+    optimized_steps(moves, Finish::Release)
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Finish {
+    CanonicalHeld,
+    Release,
+}
+
+fn optimized_steps(moves: &[CubeMove], finish: Finish) -> VecDeque<MovePlanStep> {
     let mut steps = VecDeque::new();
     let mut state = PlannerState::default();
     let mut index = 0;
@@ -149,6 +163,9 @@ pub fn optimized_held_steps(moves: &[CubeMove]) -> VecDeque<MovePlanStep> {
                 steps.push_back(MovePlanStep::MoveCompleted);
                 index += 1;
             }
+            if index == moves.len() && finish == Finish::Release {
+                break;
+            }
             restore_front_fused(&mut steps, &mut state);
             continue;
         }
@@ -165,8 +182,10 @@ pub fn optimized_held_steps(moves: &[CubeMove]) -> VecDeque<MovePlanStep> {
         index += 1;
     }
 
-    flush_group(&mut steps, &mut state, AxisGroup::LeftRight);
-    flush_group(&mut steps, &mut state, AxisGroup::TopBottom);
+    if finish == Finish::CanonicalHeld {
+        flush_group(&mut steps, &mut state, AxisGroup::LeftRight);
+        flush_group(&mut steps, &mut state, AxisGroup::TopBottom);
+    }
     steps
 }
 
@@ -410,10 +429,7 @@ fn restore_front_fused(steps: &mut VecDeque<MovePlanStep>, state: &mut PlannerSt
     reorient_front_fused(steps, state, R, P);
 }
 
-fn position_front_back_fused(
-    steps: &mut VecDeque<MovePlanStep>,
-    state: &mut PlannerState,
-) {
+fn position_front_back_fused(steps: &mut VecDeque<MovePlanStep>, state: &mut PlannerState) {
     use GripperOrientation::{FrameParallel as P, FrameParallelReversed as R};
 
     if state.dirty_grippers(AxisGroup::LeftRight).is_empty() {
@@ -429,7 +445,6 @@ fn reorient_front_fused(
     top: GripperOrientation,
     bottom: GripperOrientation,
 ) {
-
     let dirty = state.dirty_grippers(AxisGroup::LeftRight);
     debug_assert!(!dirty.is_empty());
     steps.extend([
@@ -514,6 +529,16 @@ mod tests {
         assert_eq!(optimized.len(), 18);
         assert_safe_held_plan(&optimized, 2);
         assert_decodes_to_moves(&optimized, &moves("R F"));
+    }
+
+    #[test]
+    fn execute_finish_skips_final_flush_and_front_restore() {
+        let direct = optimized_execute_steps(&moves("R"));
+        assert_eq!(direct.len(), 2);
+
+        let front = optimized_execute_steps(&moves("F"));
+        assert_eq!(front.len(), 8);
+        assert!(matches!(front.back(), Some(MovePlanStep::MoveCompleted)));
     }
 
     #[test]
@@ -624,10 +649,8 @@ mod tests {
                 MovePlanStep::SetGrippers(poses) => {
                     let is_whole_cube_reorientation = poses.len() == 2
                         && poses.iter().all(|(axis, orientation)| {
-                            matches!(
-                                axis,
-                                StandAxis::TopGripper | StandAxis::BottomGripper
-                            ) && orientation.is_frame_parallel()
+                            matches!(axis, StandAxis::TopGripper | StandAxis::BottomGripper)
+                                && orientation.is_frame_parallel()
                         });
 
                     if is_whole_cube_reorientation {
@@ -650,9 +673,9 @@ mod tests {
                         frame = match (top, bottom) {
                             (FrameParallel, FrameParallelReversed) => TestFrame::RotatedFb,
                             (FrameParallelReversed, FrameParallel) => TestFrame::Canonical,
-                            orientations => panic!(
-                                "unexpected whole-cube orientation pair: {orientations:?}"
-                            ),
+                            orientations => {
+                                panic!("unexpected whole-cube orientation pair: {orientations:?}")
+                            }
                         };
                     } else {
                         parallel_events.extend(

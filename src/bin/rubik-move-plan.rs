@@ -5,8 +5,8 @@ use clap::Parser;
 use rubik_scan::{
     cube::{parse_solution, CubeMove},
     move_planner::{
-        append_open_steps, baseline_held_steps, estimated_duration, optimized_held_steps,
-        servo_target_count, MovePlanStep, RailPair, RailTarget,
+        append_open_steps, baseline_held_steps, estimated_duration, optimized_execute_steps,
+        optimized_held_steps, servo_target_count, MovePlanStep, RailPair, RailTarget,
     },
     stand::StandCalibration,
 };
@@ -38,7 +38,11 @@ fn main() -> Result<()> {
         None => StandCalibration::default(),
     };
     let mut baseline = baseline_held_steps(&moves);
-    let mut optimized = optimized_held_steps(&moves);
+    let mut optimized = if cli.open_after {
+        optimized_execute_steps(&moves)
+    } else {
+        optimized_held_steps(&moves)
+    };
     if cli.open_after {
         append_open_steps(&mut baseline);
         append_open_steps(&mut optimized);
