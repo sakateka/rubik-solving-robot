@@ -19,7 +19,11 @@ use crate::{
     stand::{GripperOrientation, RailPosition, StandAxis, StandCalibration},
 };
 use rubik_link_protocol as link;
-use std::{collections::VecDeque, sync::mpsc, time::Instant};
+use std::{
+    collections::VecDeque,
+    sync::mpsc,
+    time::{Duration, Instant},
+};
 
 const REQUEST_CACHE_CAPACITY: usize = 16;
 const SOLVER_MAX_MOVES: u8 = 21;
@@ -882,6 +886,12 @@ where
             scan.deadline = None;
             self.advance_action_counter();
             self.emit_stand();
+            // Preserve the stable endpoint as an observable protocol state.
+            // Starting the next motion in this same tick collapses
+            // `Moving -> Stable -> Moving` into `Moving -> Moving`, which
+            // makes consumers miss the completed physical step entirely.
+            self.active_scan = Some(scan);
+            return;
         }
 
         let Some(step) = scan.steps.pop_front() else {
@@ -900,9 +910,10 @@ where
             }
             MotionStep::SetGrippers(poses) => {
                 self.status.stand.pose = transitional_pose();
+                let duration = self.gripper_motion_duration(&poses);
                 self.command_scan_grippers(&poses).map(|()| {
                     scan.pending = Some(PendingMotionStep::Grippers(poses));
-                    scan.deadline = Some(now + self.calibration.gripper_pose_duration());
+                    scan.deadline = Some(now + duration);
                 })
             }
             MotionStep::Capture(face) => {
@@ -1003,6 +1014,28 @@ where
             }
         }
         Ok(())
+    }
+
+    fn gripper_motion_duration(&self, poses: &[(StandAxis, GripperOrientation)]) -> Duration {
+        let orientation_index = |orientation: link::GripperOrientation| match orientation {
+            link::GripperOrientation::FrameParallel => 0i32,
+            link::GripperOrientation::FramePerpendicular => 1,
+            link::GripperOrientation::FrameParallelReversed => 2,
+        };
+        let quarter_turns = poses
+            .iter()
+            .filter_map(|&(axis, target)| {
+                let current = self.status.stand.grippers[stand_axis_index(axis)].current?;
+                Some(
+                    (orientation_index(link_gripper_orientation(target))
+                        - orientation_index(current))
+                    .unsigned_abs(),
+                )
+            })
+            .max()
+            .unwrap_or(1)
+            .max(1);
+        self.calibration.gripper_pose_duration() * quarter_turns
     }
 
     fn command_scan_grippers(
@@ -1244,6 +1277,11 @@ where
             execute.deadline = None;
             self.advance_action_counter();
             self.emit_stand();
+            // Do not collapse a completed actuator step and the next command
+            // into one status update. Visualisation and hardware monitoring
+            // both need to observe the stable endpoint.
+            self.active_execute = Some(execute);
+            return;
         }
 
         let Some(step) = execute.steps.pop_front() else {
@@ -1269,9 +1307,10 @@ where
             }
             MotionStep::SetGrippers(poses) => {
                 self.status.stand.pose = move_pose;
+                let duration = self.gripper_motion_duration(&poses);
                 self.command_scan_grippers(&poses).map(|()| {
                     execute.pending = Some(PendingMotionStep::Grippers(poses));
-                    execute.deadline = Some(now + self.calibration.gripper_pose_duration());
+                    execute.deadline = Some(now + duration);
                 })
             }
             MotionStep::MoveCompleted => {
@@ -2005,6 +2044,21 @@ mod tests {
         }
     }
 
+    fn assert_rail_and_gripper_motion_are_serialized<S: FaceScanner>(
+        service: &RobotService<MockOutput, S>,
+    ) {
+        let stand = &service.status().stand;
+        let rail_moving = stand
+            .rails
+            .iter()
+            .any(|axis| axis.motion == link::AxisMotion::Moving);
+        let gripper_moving = stand
+            .grippers
+            .iter()
+            .any(|axis| axis.motion == link::AxisMotion::Moving);
+        assert!(!(rail_moving && gripper_moving));
+    }
+
     fn packet(opcode: link::RequestOpcode, request_id: u32) -> ReceivedPacket {
         packet_with_payload(opcode, request_id, &[])
     }
@@ -2192,6 +2246,7 @@ mod tests {
         assert_eq!(accepted_operation(&messages), 1);
 
         service.tick(base);
+        assert_rail_and_gripper_motion_are_serialized(&service);
         assert_eq!(
             service.status().stand.pose.kind,
             link::StandPoseKind::Transitional
@@ -2199,13 +2254,16 @@ mod tests {
         assert_eq!(service.output.sets[0], vec![(5, 2500), (7, 2500)]);
 
         service.tick(base + std::time::Duration::from_millis(1_200));
+        assert_rail_and_gripper_motion_are_serialized(&service);
         assert_eq!(service.output.sets[1], vec![(4, 2500), (6, 2500)]);
         service.tick(base + std::time::Duration::from_millis(2_400));
+        assert_rail_and_gripper_motion_are_serialized(&service);
         assert_eq!(
             service.output.sets[2],
             vec![(3, 1450), (0, 1500), (2, 1450), (1, 1450)]
         );
         service.tick(base + std::time::Duration::from_millis(3_400));
+        assert_rail_and_gripper_motion_are_serialized(&service);
 
         assert_eq!(service.status().controller, link::ControllerState::Ready);
         assert_eq!(service.status().stand.pose.kind, link::StandPoseKind::Open);
@@ -2238,6 +2296,27 @@ mod tests {
             service.status().cube_session,
             Some(link::CubeSessionStatus { id: 1 })
         );
+    }
+
+    #[test]
+    fn half_turn_gripper_motion_gets_twice_the_quarter_turn_deadline() {
+        let calibration = StandCalibration::default();
+        let base_duration = calibration.gripper_pose_duration();
+        let mut service = RobotService::new(MockOutput::default(), calibration);
+        service.status.stand.grippers[link::Axis::Top as usize].current =
+            Some(link::GripperOrientation::FrameParallel);
+
+        let quarter = service.gripper_motion_duration(&[(
+            StandAxis::TopGripper,
+            GripperOrientation::FramePerpendicular,
+        )]);
+        let half = service.gripper_motion_duration(&[(
+            StandAxis::TopGripper,
+            GripperOrientation::FrameParallelReversed,
+        )]);
+
+        assert_eq!(quarter, base_duration);
+        assert_eq!(half, base_duration * 2);
     }
 
     #[test]

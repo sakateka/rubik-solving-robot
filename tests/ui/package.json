@@ -1,0 +1,13 @@
+{
+  "name": "rubik-robotd-ui-tests",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Playwright Test suite for the rubik-robotd-sim operator UI",
+  "scripts": {
+    "test": "playwright test",
+    "report": "playwright show-report artifacts/html"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.0"
+  }
+}

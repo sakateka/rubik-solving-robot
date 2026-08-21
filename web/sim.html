@@ -23,8 +23,15 @@
   #collisionVignette { position: absolute; inset: 0; pointer-events: none; opacity: 0;
     transition: opacity .25s; box-shadow: inset 0 0 120px 30px rgba(255,40,60,.55); }
   #collisionVignette.active { opacity: 1; }
-  #scanFlash { position: absolute; inset: 0; pointer-events: none; opacity: 0;
-    background: rgba(80,170,255,.18); transition: opacity .15s; }
+  #unfold { position: absolute; top: 10px; right: 10px; background: rgba(13,17,23,.88);
+    border: 1px solid var(--line); border-radius: 8px; padding: 5px; }
+  #speedControls { position: absolute; top: 10px; right: 150px; display: flex; gap: 4px; }
+  #speedControls button { padding: 4px 7px; background: rgba(13,17,23,.88); }
+  #speedControls button.active { color: var(--accent); border-color: var(--accent);
+    box-shadow: inset 0 0 0 1px rgba(77,163,255,.22); }
+  #viewGizmo { position: absolute; bottom: 10px; right: 10px; cursor: pointer;
+    background: rgba(13,17,23,.6); border-radius: 50%; }
+  .badge.flash { border-color: var(--accent); color: var(--accent); }
   aside { background: var(--panel); border-left: 1px solid var(--line); overflow-y: auto; padding: 14px; }
   h1 { font-size: 15px; margin: 0 0 10px; }
   h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim);
@@ -62,17 +69,22 @@
       <span class="badge" id="ctrlBadge">—</span>
       <span class="badge" id="poseBadge">—</span>
       <span class="badge" id="frameBadge">frame: canonical</span>
+      <span class="badge" id="scanBadge">scan: —</span>
     </div>
+    <div id="speedControls" title="simulation animation speed; click the active speed to return to ×1">
+      <button data-speed="2">×2</button>
+      <button data-speed="4">×4</button>
+      <button data-speed="8">×8</button>
+    </div>
+    <canvas id="unfold" width="128" height="96"></canvas>
+    <canvas id="viewGizmo" width="110" height="110"
+      title="click an axis to view from that side"></canvas>
     <div id="collisionVignette"></div>
-    <div id="scanFlash"></div>
   </div>
   <aside>
     <h1>Rubik Robot — Simulator</h1>
 
     <h2>Session</h2>
-    <div class="row">
-      <div style="flex:1"><label>session id</label><input id="sessionId" type="number" value="1"></div>
-    </div>
     <div class="row">
       <button id="btnRecover">Recover→Open</button>
       <button id="btnGrip">Grip</button>
@@ -88,11 +100,12 @@
     <div class="row">
       <input id="movesInput" placeholder="moves, e.g. R U R' U'" style="flex:1">
       <button id="btnMoves">Run moves</button>
+      <button id="btnLoadScramble">Load</button>
     </div>
 
     <h2>Stand</h2>
     <table id="axisTable">
-      <thead><tr><th>axis</th><th>current</th><th>target</th><th>progress</th></tr></thead>
+      <thead><tr><th>axis</th><th>rail</th><th>→</th><th>p</th><th>claw</th><th>p</th></tr></thead>
       <tbody></tbody>
     </table>
     <div class="kv"><span>outputs</span><b id="outputsVal">—</b></div>
@@ -118,8 +131,23 @@
 <script type="module">
 import * as THREE from 'three';
 
+/* window.name belongs to a browsing context: it survives reloads but is not
+ * inherited by an independently opened tab (sessionStorage may be copied by
+ * Duplicate Tab in some browsers). */
+const requestedSession = new URLSearchParams(location.search).get('session');
+const namedSession = window.name.startsWith('rubik-sim:')
+  ? window.name.slice('rubik-sim:'.length) : null;
+const SIM_SESSION = requestedSession || namedSession || crypto.randomUUID();
+window.name = `rubik-sim:${SIM_SESSION}`;
+const sessionUrl = path => {
+  const url = new URL(path, location.origin);
+  url.searchParams.set('session', SIM_SESSION);
+  return url.pathname + url.search;
+};
+window.__simSession = SIM_SESSION;
+
 /* ---------- constants ---------- */
-const AXIS_NAMES = ['left', 'right', 'top', 'bottom'];
+const AXIS_NAMES = ['left', 'right', 'up', 'down'];
 const RAIL_OPEN = 0, RAIL_GRIP = 1;
 const GRIP_PARALLEL = 0, GRIP_PERP = 1, GRIP_PARALLEL_REV = 2;
 const POSE_NAMES = ['unknown', 'open', 'canonical-grip', 'scan-pose', 'move-pose', 'transitional'];
@@ -137,9 +165,12 @@ const COLOR_NAME = ['white', 'yellow', 'red', 'orange', 'green', 'blue'];
 const stage = document.getElementById('stage');
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
 stage.prepend(renderer.domElement);
 const scene = new THREE.Scene();
-scene.background = new THREE.Color('#0b0e13');
+scene.background = new THREE.Color('#161b24');
+scene.fog = new THREE.Fog('#161b24', 26, 60);
 const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 200);
 
 function resize() {
@@ -150,27 +181,24 @@ function resize() {
 }
 addEventListener('resize', resize);
 
-scene.add(new THREE.AmbientLight(0xffffff, 0.55));
-const sun = new THREE.DirectionalLight(0xffffff, 1.4);
-sun.position.set(6, 10, 7);
+scene.add(new THREE.HemisphereLight(0xdde7ff, 0x1a2030, 0.85));
+scene.add(new THREE.AmbientLight(0xffffff, 0.25));
+const sun = new THREE.DirectionalLight(0xfff3e0, 2.2);
+sun.position.set(7, 12, 8);
 scene.add(sun);
-const fill = new THREE.DirectionalLight(0x88aaff, 0.35);
+const fill = new THREE.DirectionalLight(0x88aaff, 0.5);
 fill.position.set(-7, 4, -6);
 scene.add(fill);
 
-const grid = new THREE.GridHelper(24, 24, 0x223047, 0x161d29);
-grid.position.y = -3.2;
-scene.add(grid);
-
 /* orbit */
-const orbit = { theta: Math.PI * 0.28, phi: Math.PI * 0.36, radius: 13, target: new THREE.Vector3(0, 0, 0), snapped: false };
+const orbit = { theta: Math.PI * 0.28, phi: Math.PI * 0.36, radius: 13, target: new THREE.Vector3(0, 0, 0) };
 function applyCamera() {
   const sp = new THREE.Spherical(orbit.radius, orbit.phi, orbit.theta);
   camera.position.setFromSpherical(sp).add(orbit.target);
   camera.lookAt(orbit.target);
 }
 let dragging = null;
-renderer.domElement.addEventListener('pointerdown', e => { dragging = e; orbit.snapped = false; });
+renderer.domElement.addEventListener('pointerdown', e => { dragging = e; });
 addEventListener('pointermove', e => {
   if (!dragging) return;
   orbit.theta -= e.movementX * 0.006;
@@ -182,77 +210,168 @@ renderer.domElement.addEventListener('wheel', e => {
   orbit.radius = Math.min(40, Math.max(5, orbit.radius * (1 + Math.sign(e.deltaY) * 0.08)));
 }, { passive: false });
 
-function snapCameraTo(faceLetter) {
-  const d = 11;
-  const dirs = {
-    F: [0, 0, d], B: [0, 0, -d], L: [-d, 0, 0], R: [d, 0, 0],
-    U: [0, d, 0.001], D: [0, -d, 0.001],
-  };
-  const [x, y, z] = dirs[faceLetter];
-  camera.position.set(x, y, z);
-  camera.up.set(0, 1, 0);
-  if (faceLetter === 'U' || faceLetter === 'D') camera.up.set(0, 0, faceLetter === 'U' ? -1 : 1);
-  camera.lookAt(0, 0, 0);
-  orbit.snapped = true;
+/* virtual scanner prop: fixed camera at +Z visualised during scans.
+ * The cube itself is NEVER rotated for the scanner — its live state is shown
+ * by the unfold widget (top-right) instead. */
+const scanCam = new THREE.PerspectiveCamera(38, 16 / 9, 0.1, 12);
+scanCam.position.set(0, 0, 6.4);
+scanCam.lookAt(0, 0, 0);
+const scanHelper = new THREE.CameraHelper(scanCam);
+scanHelper.visible = false;
+scene.add(scanHelper);
+
+/* Blender-style camera object: a rectangular film gate, tapered frustum and
+ * top marker. It is a persistent scene object, not the flashing CameraHelper. */
+const cameraLines = [];
+const addCameraLine = (a, b) => cameraLines.push(...a, ...b);
+const film = [
+  [-0.90, -0.58, 4.28], [0.90, -0.58, 4.28],
+  [0.90, 0.58, 4.28], [-0.90, 0.58, 4.28],
+];
+const rear = [
+  [-0.30, -0.22, 5.28], [0.30, -0.22, 5.28],
+  [0.30, 0.22, 5.28], [-0.30, 0.22, 5.28],
+];
+for (let i = 0; i < 4; i++) {
+  addCameraLine(film[i], film[(i + 1) % 4]);
+  addCameraLine(rear[i], rear[(i + 1) % 4]);
+  addCameraLine(film[i], rear[i]);
 }
+// Blender's little triangle indicates which edge is the top of the frame.
+addCameraLine([-0.34, 0.58, 4.28], [0, 0.93, 4.28]);
+addCameraLine([0, 0.93, 4.28], [0.34, 0.58, 4.28]);
+addCameraLine([0.34, 0.58, 4.28], [-0.34, 0.58, 4.28]);
+const scannerGeometry = new THREE.BufferGeometry();
+scannerGeometry.setAttribute('position', new THREE.Float32BufferAttribute(cameraLines, 3));
+const scannerModel = new THREE.LineSegments(scannerGeometry, new THREE.LineBasicMaterial({
+  color: 0xffa43a, transparent: true, opacity: 0.92,
+}));
+scene.add(scannerModel);
 
-/* stand geometry */
-const metal = new THREE.MeshStandardMaterial({ color: 0x39465c, roughness: 0.55, metalness: 0.65 });
-const darkMetal = new THREE.MeshStandardMaterial({ color: 0x232c3b, roughness: 0.7, metalness: 0.5 });
-const clawMat = new THREE.MeshStandardMaterial({ color: 0xcfd8e6, roughness: 0.35, metalness: 0.75 });
+/* stand geometry: real printed grippers (STL), no rail beams */
+const darkMetal = new THREE.MeshStandardMaterial({ color: 0x39445c, roughness: 0.6, metalness: 0.6 });
+const gripperMat = new THREE.MeshStandardMaterial({ color: 0xd9e2ef, roughness: 0.55, metalness: 0.25 });
 
-const CUBE_HALF = 1.56;
-const RAIL_REACH_OPEN = 4.4, RAIL_REACH_GRIP = 2.35;
+/* mm -> scene units (cube face 57mm = 3.06u) */
+const MM = 3.06 / 57;
+/* claw standoff from center: STL height plane z=0 sits at -reach (outward),
+   the 27mm-tall hook rises toward the cube */
+// Translate the complete rail range toward the cube without changing its
+// 1.60-unit stroke.
+const REACH_OPEN = 4.04, REACH_GRIP = 2.44;
 
-function makeRail(axis) {
-  const g = new THREE.Group();
-  const horizontal = axis === 'left' || axis === 'right';
-  const sign = axis === 'left' || axis === 'bottom' ? -1 : 1;
-  const beamLen = 3.4;
-  const beam = new THREE.Mesh(new THREE.BoxGeometry(horizontal ? beamLen : 0.5, horizontal ? 0.5 : beamLen, 0.5), metal);
-  const beamCenter = RAIL_REACH_GRIP + beamLen / 2 - 0.4;
-  if (horizontal) beam.position.set(sign * beamCenter, 0, 0); else beam.position.set(0, sign * beamCenter, 0);
-  g.add(beam);
-  const carriage = new THREE.Mesh(new THREE.BoxGeometry(horizontal ? 0.7 : 0.62, horizontal ? 0.62 : 0.7, 0.62), darkMetal);
-  g.add(carriage);
-  const claw = new THREE.Group();
-  for (const off of [-0.52, 0.52]) {
-    const prong = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.16, 1.15), clawMat);
-    prong.position.set(0, off, 0.72);
-    claw.add(prong);
+async function loadSTL(url) {
+  const buf = await (await fetch(url)).arrayBuffer();
+  const dv = new DataView(buf);
+  const count = dv.getUint32(80, true);
+  const positions = new Float32Array(count * 9);
+  let p = 84;
+  for (let i = 0; i < count; i++) {
+    p += 12; // facet normal
+    for (let v = 0; v < 3; v++) {
+      positions[i * 9 + v * 3] = dv.getFloat32(p, true);
+      positions[i * 9 + v * 3 + 1] = dv.getFloat32(p + 4, true);
+      positions[i * 9 + v * 3 + 2] = dv.getFloat32(p + 8, true);
+      p += 12;
+    }
+    p += 2; // attribute
   }
-  const palm = new THREE.Mesh(new THREE.BoxGeometry(0.34, 1.25, 0.2), clawMat);
-  palm.position.set(0, 0, 0.12);
-  claw.add(palm);
-  carriage.add(claw);
-  g.userData = { axis, horizontal, sign, carriage, claw };
-  scene.add(g);
-  return g;
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geo.computeVertexNormals();
+  geo.scale(MM, MM, MM);
+  return geo;
 }
-const rails = Object.fromEntries(['left', 'right', 'top', 'bottom'].map(makeRail));
 
-function applyRailPose(rail, progress, gripAngleRad) {
-  const { horizontal, sign, carriage, claw } = rail.userData;
-  const reach = RAIL_REACH_OPEN + (RAIL_REACH_GRIP - RAIL_REACH_OPEN) * progress;
-  if (horizontal) carriage.position.set(sign * reach, 0, 0);
-  else carriage.position.set(0, sign * reach, 0);
-  claw.rotation.x = gripAngleRad;
-  if (!horizontal) claw.rotation.y = sign > 0 ? 0 : Math.PI;
+/* per-side basis: local +z = inward (toward cube); local +y = arm direction
+   (toward the printed hook). The claw spins about the approach axis, so it
+   always sweeps INSIDE its own face slab and cannot hit neighbouring
+   grippers — same as the real machine. */
+const GRIP_BASES = {
+  left:   { z: [1, 0, 0],  y: [0, 1, 0] },  // arm vertical, hook at top
+  right:  { z: [-1, 0, 0], y: [0, 1, 0] },
+  top:    { z: [0, -1, 0], y: [1, 0, 0] },  // arm horizontal
+  bottom: { z: [0, 1, 0],  y: [1, 0, 0] },
+};
+const GRIP_ORDER = ['left', 'right', 'top', 'bottom'];
+const grips = {};
+
+function gripperLabel(text) {
+  const cv = document.createElement('canvas');
+  cv.width = cv.height = 96;
+  const ctx = cv.getContext('2d');
+  ctx.clearRect(0, 0, 96, 96);
+  ctx.strokeStyle = '#10243a'; ctx.lineWidth = 8; ctx.lineJoin = 'round';
+  ctx.font = '900 68px system-ui'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.strokeText(text, 48, 50);
+  ctx.fillStyle = '#4da3ff';
+  ctx.fillText(text, 48, 50);
+  const material = new THREE.MeshBasicMaterial({
+    map: new THREE.CanvasTexture(cv), transparent: true, depthWrite: false,
+    polygonOffset: true, polygonOffsetFactor: -2, side: THREE.DoubleSide,
+  });
+  const decal = new THREE.Mesh(new THREE.PlaneGeometry(0.62, 0.62), material);
+  // STL's z=0 plane is the outer flat face. Offset by a hair to avoid
+  // z-fighting; unlike a Sprite this decal follows every claw rotation.
+  decal.position.set(0, 1.15, -0.006);
+  decal.rotation.y = Math.PI;
+  return decal;
+}
+
+function buildGrippers(geometry) {
+  for (const name of GRIP_ORDER) {
+    const basis = GRIP_BASES[name];
+    const wrapper = new THREE.Group();
+    const xAxis = new THREE.Vector3(...basis.y)
+      .cross(new THREE.Vector3(...basis.z));
+    wrapper.matrix.makeBasis(xAxis, new THREE.Vector3(...basis.y), new THREE.Vector3(...basis.z));
+    wrapper.matrixAutoUpdate = false;
+
+    const spinner = new THREE.Group(); // rotates about the approach axis
+    spinner.position.z = -REACH_OPEN;
+    const mesh = new THREE.Mesh(geometry, gripperMat);
+    mesh.castShadow = true;
+    spinner.add(mesh);
+
+    const label = gripperLabel({ left: 'L', right: 'R', top: 'U', bottom: 'D' }[name]);
+    spinner.add(label);
+
+    wrapper.add(spinner);
+    scene.add(wrapper);
+    grips[name] = { spinner, name };
+  }
+}
+
+function applyGripperPose(grip, progress, angleRad) {
+  if (!grip) return;
+  const reach = REACH_OPEN + (REACH_GRIP - REACH_OPEN) * progress;
+  grip.spinner.position.z = -reach;        // outside the cube, opposite to inward
+  grip.spinner.rotation.z = angleRad ?? 0; // in-slab sweep about the approach axis
 }
 
 /* cube */
 const SPACING = 1.04;
 const cubies = [];
-const bodyMat = new THREE.MeshStandardMaterial({ color: 0x0a0a0a, roughness: 0.4 });
-const stickerMats = STICKER_HEX.map(hex => new THREE.MeshStandardMaterial({ color: hex, roughness: 0.28 }));
+const bodyMat = new THREE.MeshStandardMaterial({ color: 0x181a1e, roughness: 0.35 });
+const stickerMats = STICKER_HEX.map(hex => {
+  const color = new THREE.Color(hex);
+  return new THREE.MeshStandardMaterial({
+    color, roughness: 0.25, emissive: color, emissiveIntensity: 0.22,
+  });
+});
 const cubeGroup = new THREE.Group();
 scene.add(cubeGroup);
+
+const FACE_COLOR_BY_NORMAL = {
+  '0,1,0': 0, '0,-1,0': 1, '1,0,0': 2, '-1,0,0': 3, '0,0,1': 4, '0,0,-1': 5,
+};
 
 for (let x = -1; x <= 1; x++) for (let y = -1; y <= 1; y++) for (let z = -1; z <= 1; z++) {
   if (!x && !y && !z) continue;
   const cubie = new THREE.Group();
   cubie.position.set(x * SPACING, y * SPACING, z * SPACING);
-  const body = new THREE.Mesh(new THREE.BoxGeometry(0.98, 0.98, 0.98), bodyMat);
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.99, 0.99, 0.99), bodyMat);
+  body.castShadow = true;
   cubie.add(body);
   const faces = [
     [[0, 1, 0], new THREE.Vector3(0, 1, 0)], [[0, -1, 0], new THREE.Vector3(0, -1, 0)],
@@ -260,9 +379,14 @@ for (let x = -1; x <= 1; x++) for (let y = -1; y <= 1; y++) for (let z = -1; z <
     [[0, 0, 1], new THREE.Vector3(0, 0, 1)], [[0, 0, -1], new THREE.Vector3(0, 0, -1)],
   ];
   for (const [, normal] of faces) {
-    const sticker = new THREE.Mesh(new THREE.PlaneGeometry(0.82, 0.82), stickerMats[4].clone());
-    sticker.material.color.set(0x14161a);
-    sticker.position.copy(normal).multiplyScalar(0.5);
+    // A physical cubie only has stickers on faces exposed at its home
+    // position. Internal stickers made facelet snapshots ambiguous (26
+    // candidates per face instead of exactly 9).
+    if (x * normal.x + y * normal.y + z * normal.z !== 1) continue;
+    const colorIdx = FACE_COLOR_BY_NORMAL[`${normal.x},${normal.y},${normal.z}`];
+    const sticker = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.84, 0.84), stickerMats[colorIdx].clone());
+    sticker.position.copy(normal).multiplyScalar(0.505);
     sticker.lookAt(normal.clone().multiplyScalar(2));
     sticker.userData.normal = normal.clone();
     cubie.add(sticker);
@@ -276,13 +400,15 @@ function resetCube() {
   for (const c of cubies) {
     c.position.copy(c.userData.home.pos);
     c.quaternion.copy(c.userData.home.quat);
+    // restore solved colors from the home orientation
+    for (const s of c.children) {
+      if (!s.userData.normal) continue;
+      const hn = s.userData.normal.clone().applyQuaternion(c.userData.home.quat).round();
+      const idx = FACE_COLOR_BY_NORMAL[`${hn.x},${hn.y},${hn.z}`];
+      if (idx !== undefined) s.material.color.set(STICKER_HEX[idx]);
+    }
   }
   frameQuarters = 0;
-  if (typeof oracle !== 'undefined') {
-    oracle.expected = [];
-    oracle.expectedIdx = 0;
-    oracle.pending = [[], [], [], []];
-  }
   updateFrameBadge();
 }
 
@@ -290,30 +416,58 @@ function resetCube() {
 let frameQuarters = 0; // 0 = canonical, 1 = rotated-fb (cube yawed +90° about Y)
 const animQueue = [];
 let activeAnim = null;
+let animationSpeed = 1;
 
-function rotY(v, quarters) {
-  const out = v.clone();
-  for (let i = 0; i < ((quarters % 4) + 4) % 4; i++)
-    out.set(out.z, out.y, -out.x);
-  return out;
+function showAnimationSpeed(multiplier) {
+  animationSpeed = multiplier;
+  for (const button of document.querySelectorAll('#speedControls button')) {
+    button.classList.toggle('active', Number(button.dataset.speed) === multiplier);
+  }
 }
 
-function enqueueMove(faceLetter, quarterTurns /* signed int: +1 ccw, -1 cw, ±2 half */) {
-  animQueue.push({ faceLetter, quarterTurns });
+for (const button of document.querySelectorAll('#speedControls button')) {
+  button.onclick = async () => {
+    const requested = Number(button.dataset.speed);
+    const multiplier = animationSpeed === requested ? 1 : requested;
+    const result = await command({ command: 'set_animation_speed', multiplier });
+    if (result.ok) showAnimationSpeed(result.response.animation_speed);
+  };
+}
+
+function enqueueMove(faceLetter, quarterTurns /* signed int: +1 ccw, -1 cw, ±2 half */,
+                     serverDriven = false, visualKey = null) {
+  animQueue.push({ faceLetter, quarterTurns, serverDriven, visualKey });
 }
 
 function startNextAnim() {
   if (activeAnim || !animQueue.length) return;
-  const { faceLetter, quarterTurns } = animQueue.shift();
-  const worldNormal = rotY(new THREE.Vector3(...FACE_NORMAL[faceLetter]), frameQuarters);
-  const layer = cubies.filter(c => c.position.dot(worldNormal) > SPACING * 1.4);
+  const item = animQueue.shift();
+  if (item.wholeCube) {
+    activeAnim = {
+      wholeCube: true, t: 0, duration: 1,
+      serverDriven: item.serverDriven,
+      visualKey: item.visualKey,
+      qFrom: item.qFrom ?? cubeGroup.quaternion.clone(),
+      qTo: item.qTo ?? new THREE.Quaternion(),
+    };
+    return;
+  }
+  // Cubies live in cubeGroup-local canonical coordinates. Whole-cube yaw is
+  // presentation on the parent and must not be applied a second time here.
+  const layerNormal = new THREE.Vector3(...FACE_NORMAL[item.faceLetter]);
+  // outer ring along the normal: dot = +SPACING (center row is 0, far side −SPACING)
+  const layer = cubies.filter(c => c.position.dot(layerNormal) > SPACING * 0.5);
+  // Singmaster direction is viewed from the face, so D/L/B rotate around
+  // their signed negative normals rather than the positive coordinate axis.
+  const worldNormal = layerNormal.clone();
   const pivot = new THREE.Group();
   cubeGroup.add(pivot);
   for (const c of layer) pivot.attach(c);
   activeAnim = {
     pivot, layer, worldNormal,
-    total: quarterTurns * Math.PI / 2,
-    t: 0, duration: 0.38,
+    total: item.quarterTurns * Math.PI / 2,
+    t: 0, duration: 0.38, serverDriven: item.serverDriven,
+    visualKey: item.visualKey,
   };
 }
 
@@ -343,12 +497,12 @@ function paintFace(faceIdx, colors) {
   const n = new THREE.Vector3(...FACE_NORMAL[letter]);
   let u, v;
   switch (letter) {
-    case 'U': u = new THREE.Vector3(1, 0, 0); v = new THREE.Vector3(0, 0, 1); break;
-    case 'D': u = new THREE.Vector3(1, 0, 0); v = new THREE.Vector3(0, 0, -1); break;
-    case 'F': u = new THREE.Vector3(1, 0, 0); v = new THREE.Vector3(0, -1, 0); break;
-    case 'B': u = new THREE.Vector3(-1, 0, 0); v = new THREE.Vector3(0, -1, 0); break;
-    case 'R': u = new THREE.Vector3(0, 0, -1); v = new THREE.Vector3(0, -1, 0); break;
-    case 'L': u = new THREE.Vector3(0, 0, 1); v = new THREE.Vector3(0, -1, 0); break;
+    case 'U': u = new THREE.Vector3(1, 0, 0); v = new THREE.Vector3(0, 0, -1); break;
+    case 'D': u = new THREE.Vector3(1, 0, 0); v = new THREE.Vector3(0, 0, 1); break;
+    case 'F': u = new THREE.Vector3(1, 0, 0); v = new THREE.Vector3(0, 1, 0); break;
+    case 'B': u = new THREE.Vector3(-1, 0, 0); v = new THREE.Vector3(0, 1, 0); break;
+    case 'R': u = new THREE.Vector3(0, 0, -1); v = new THREE.Vector3(0, 1, 0); break;
+    case 'L': u = new THREE.Vector3(0, 0, 1); v = new THREE.Vector3(0, 1, 0); break;
   }
   const q = new THREE.Quaternion(), wp = new THREE.Vector3();
   const found = [];
@@ -368,121 +522,83 @@ function paintFace(faceIdx, colors) {
   for (const { idx, s } of found) s.material.color.set(STICKER_HEX[colors[idx]] ?? 0x14161a);
 }
 
-/* ---------- SPA oracle ---------- */
-// Reconciles observed stand motion (status snapshots) against the expected
-// move queue. Physical signatures (mirroring move_planner):
-//   - whole-cube reorientation: T+B claws settle frame-parallel while LR
-//     rails are open -> frame toggles canonical <-> rotated-fb;
-//   - a quarter turn: one frame-parallel settle on the face's gripper;
-//   - a half turn: two settles (rail closes between them, so both must be
-//     collected before the move counts).
-const oracle = {
-  prevRails: [null, null, null, null],
-  prevGrippers: [null, null, null, null],
-  pending: [[], [], [], []],
-  expected: [],   // [{face: 'R', turns: -1|1|2}, ...]
-  expectedIdx: 0,
+/* ---------- cube snapshot probes ----------
+ * The server owns the authoritative 54 facelets. This projection is used for
+ * render verification and tests, never to drive scanner state. */
+const FACE_UV = {
+  U: [[1, 0, 0], [0, 0, -1]], D: [[1, 0, 0], [0, 0, 1]],
+  F: [[1, 0, 0], [0, 1, 0]], B: [[-1, 0, 0], [0, 1, 0]],
+  R: [[0, 0, -1], [0, 1, 0]], L: [[0, 0, 1], [0, 1, 0]],
 };
-
-function oracleGate(status) {
-  const op = status.active_operation;
-  return !!op && (op.kind === 3 || op.kind === 7 || op.kind === 4);
-}
-
-function settled(axis) { return axis.motion !== 2; } // AxisMotion::Moving
-
-function setExpectedMoves(moves) {
-  oracle.expected = moves;
-  oracle.expectedIdx = 0;
-  oracle.pending = [[], [], [], []];
-}
-
-function axisFaceLetter(axis) {
-  if (axis === 2) return 'U';
-  if (axis === 3) return 'D';
-  return oracle.frame === 0 ? (axis === 0 ? 'L' : 'R') : (axis === 0 ? 'B' : 'F');
-}
-
-function feedOracle(status) {
-  const rails = status.stand.rails;
-  const grippers = status.stand.grippers;
-
-  if (!oracleGate(status)) {
-    oracle.prevRails = rails.map(r => r.current);
-    oracle.prevGrippers = grippers.map(g => g.current);
-    return;
-  }
-
-  // auto-fill expectations for auto scan-solve-execute once solved
-  if (!oracle.expected.length && status.solution.move_count &&
-      status.solution.id != null) {
-    setExpectedMoves(status.solution.moves.slice(0, status.solution.move_count)
-      .map(m => ({ face: FACE_LETTER[m.face], turns: [1, -1, 2][m.turn] })));
-  }
-
-  // reorientation: LR rails open + both T/B claws settled frame-parallel
-  const lrOpen = rails[0].current === RAIL_OPEN && rails[1].current === RAIL_OPEN;
-  const tbParallel = [2, 3].every(i =>
-    settled(grippers[i]) &&
-    (grippers[i].current === GRIP_PARALLEL || grippers[i].current === GRIP_PARALLEL_REV));
-  if (lrOpen && tbParallel) {
-    const top = grippers[2].current, bottom = grippers[3].current;
-    const detected = (top === GRIP_PARALLEL && bottom === GRIP_PARALLEL_REV) ? 1
-      : (top === GRIP_PARALLEL_REV && bottom === GRIP_PARALLEL) ? 0 : null;
-    if (detected !== null && frameQuarters !== detected) {
-      frameQuarters = detected;
-      updateFrameBadge();
-      enqueueWholeCubeRotation(detected === 1);
-      oracle.pending = [[], [], [], []];
+function collectFacelets() {
+  const out = new Array(54).fill(null);
+  const q = new THREE.Quaternion(), wp = new THREE.Vector3();
+  for (let f = 0; f < 6; f++) {
+    const letter = FACE_LETTER[f];
+    const n = new THREE.Vector3(...FACE_NORMAL[letter]);
+    const [u, v] = FACE_UV[letter].map(a => new THREE.Vector3(...a));
+    for (const c of cubies) {
+      for (const s of c.children) {
+        if (!s.userData.normal) continue;
+        const wn = s.userData.normal.clone().applyQuaternion(c.quaternion);
+        if (wn.dot(n) < 0.9) continue;
+        wp.copy(s.position).applyQuaternion(c.quaternion).add(c.position);
+        const col = Math.round(wp.dot(u) / SPACING) + 1;
+        const row = 1 - Math.round(wp.dot(v) / SPACING);
+        // sticker material color -> StickerColor index
+        const hex = '#' + s.material.color.getHexString();
+        const ci = STICKER_HEX.indexOf(hex);
+        out[f * 9 + row * 3 + col] = ci === -1 ? null : ci;
+      }
     }
   }
-
-  // single-axis turn events
-  for (const axis of [0, 1, 2, 3]) {
-    const g = grippers[axis];
-    const cur = g.current;
-    if (settled(g) && (cur === GRIP_PARALLEL || cur === GRIP_PARALLEL_REV) &&
-        cur !== oracle.prevGrippers[axis] && !tbParallel) {
-      oracle.pending[axis].push(cur);
-      tryCompleteMove(axis);
-    }
-    oracle.prevRails[axis] = rails[axis].current;
-    oracle.prevGrippers[axis] = g.current;
+  return out.map(v => v ?? 255);
+}
+async function restoreCubeState() {
+  resetCube();
+  try {
+    const res = await fetch(sessionUrl('/api/cube'));
+    applyServerCube(await res.json(), false);
+  } catch (error) {
+    log(`cube snapshot unavailable: ${error.message}`, 'er');
   }
 }
 
-function tryCompleteMove(axis) {
-  const events = oracle.pending[axis];
-  const exp = oracle.expected[oracle.expectedIdx];
-  // needed settle count: two for a half turn, one otherwise
-  const need = exp && exp.turns === 2 ? 2 : 1;
-  if (events.length < need) return;
+function applyServerCube(snapshot, countCorrections = true) {
+  if (!Array.isArray(snapshot?.cubies) || snapshot.cubies.length !== 26)
+    throw new Error('bad cubie snapshot');
+  const byHome = new Map(cubies.map(cubie => {
+    const p = cubie.userData.home.pos;
+    return [`${Math.round(p.x / SPACING)},${Math.round(p.y / SPACING)},${Math.round(p.z / SPACING)}`, cubie];
+  }));
+  for (const state of snapshot.cubies) {
+    const cubie = byHome.get(state.home.join(','));
+    if (!cubie) throw new Error(`unknown cubie ${state.home}`);
+    const renderedPosition = [cubie.position.x, cubie.position.y, cubie.position.z]
+      .map(value => Math.round(value / SPACING));
+    const renderedBasis = [[1, 0, 0], [0, 1, 0], [0, 0, 1]].map(vector =>
+      new THREE.Vector3(...vector).applyQuaternion(cubie.quaternion).toArray()
+        .map(value => Math.round(value)));
+    if (countCorrections &&
+        (renderedPosition.join(',') !== state.position.join(',') ||
+         JSON.stringify(renderedBasis) !== JSON.stringify(state.basis)))
+      cubeSnapshotCorrections++;
 
-  let face, turns;
-  if (need === 2) {
-    face = axisFaceLetter(axis);
-    turns = 2;
-  } else {
-    face = axisFaceLetter(axis);
-    turns = events[0] === GRIP_PARALLEL ? 1 : -1;
+    cubie.position.set(...state.position.map(value => value * SPACING));
+    const matrix = new THREE.Matrix4().makeBasis(
+      new THREE.Vector3(...state.basis[0]),
+      new THREE.Vector3(...state.basis[1]),
+      new THREE.Vector3(...state.basis[2]));
+    cubie.quaternion.setFromRotationMatrix(matrix);
   }
-  oracle.pending[axis] = [];
-  if (exp) {
-    if (exp.face !== face || exp.turns !== turns) {
-      log(`move mismatch: expected ${exp.face}${turnName(exp.turns)}, ` +
-        `observed ${face}${turnName(turns)}`, 'er');
-    }
-    oracle.expectedIdx++;
-  }
-  enqueueMove(face, turns);
 }
 
-function turnName(turns) {
-  return turns === 2 ? '2' : turns === 1 ? "'" : '';
-}
-
-function enqueueWholeCubeRotation(toRotated) {
-  animQueue.push({ wholeCube: true, toRotated });
+function quaternionFromBasis(basis) {
+  const matrix = new THREE.Matrix4().makeBasis(
+    new THREE.Vector3(...basis[0]),
+    new THREE.Vector3(...basis[1]),
+    new THREE.Vector3(...basis[2]));
+  return new THREE.Quaternion().setFromRotationMatrix(matrix);
 }
 
 function updateFrameBadge() {
@@ -490,64 +606,309 @@ function updateFrameBadge() {
     `frame: ${frameQuarters ? 'rotated-fb' : 'canonical'}`;
 }
 
-/* ---------- server link ---------- */
+let serverVisualMove = null;
+let serverRigidTurn = null;
+let rigidTurnsStarted = 0;
+let rigidTurnsCompleted = 0;
+let layerTurnsStarted = 0;
+function feedServerVisual(visual) {
+  if (!visual) return;
+  const pose = visual.cube_pose;
+  const rigid = pose?.active;
+  if (frameQuarters !== visual.frame_quarters) {
+    frameQuarters = visual.frame_quarters;
+    updateFrameBadge();
+  }
+
+  if (rigid) {
+    const key = `${rigid.operation_id}:${rigid.axis.join(',')}:${rigid.turns}`;
+    if (serverRigidTurn?.key !== key) {
+      serverRigidTurn = { key, fraction: rigid.fraction };
+      rigidTurnsStarted++;
+    } else {
+      serverRigidTurn.fraction = rigid.fraction;
+    }
+    const explicitTurn = new THREE.Quaternion().setFromAxisAngle(
+      new THREE.Vector3(...rigid.axis), rigid.turns * Math.PI / 2 * rigid.fraction);
+    cubeGroup.quaternion.copy(quaternionFromBasis(rigid.from_basis).premultiply(explicitTurn));
+  } else {
+    if (serverRigidTurn) rigidTurnsCompleted++;
+    serverRigidTurn = null;
+    if (pose?.basis)
+      cubeGroup.quaternion.copy(quaternionFromBasis(pose.basis));
+  }
+
+  const move = visual.active_move;
+  if (!move) {
+    if (activeAnim?.serverDriven && !activeAnim.wholeCube) {
+      activeAnim.t = activeAnim.duration;
+      finishAnim();
+    }
+    serverVisualMove = null;
+    return;
+  }
+  const key = `${move.operation_id}:${move.move_index}:${move.face}:${move.turns}`;
+  if (serverVisualMove?.key !== key) {
+    // SSE telemetry can advance to the next move between two browser frames.
+    // Never let the new move's fraction rewind or drive the previous pivot.
+    if (activeAnim?.serverDriven && !activeAnim.wholeCube
+        && activeAnim.visualKey !== key) {
+      activeAnim.t = activeAnim.duration;
+      finishAnim();
+    }
+    serverVisualMove = { key, fraction: 0 };
+    layerTurnsStarted++;
+    enqueueMove(FACE_LETTER[move.face], move.turns, true, key);
+    startNextAnim();
+  }
+  // Telemetry interpolation may be recomputed when a status boundary lands.
+  // A physical move cannot un-turn, so its visual progress is monotonic.
+  serverVisualMove.fraction = Math.max(serverVisualMove.fraction, move.fraction);
+  if (activeAnim?.serverDriven && !activeAnim.wholeCube
+      && activeAnim.visualKey === key)
+    activeAnim.t = Math.max(
+      activeAnim.t,
+      activeAnim.duration * serverVisualMove.fraction,
+    );
+}
+
+// debug probe for automated tests
+window.__animDebug = () => ({
+  queue: animQueue.length,
+  active: serverRigidTurn
+    ? { t: +serverRigidTurn.fraction.toFixed(3), dur: 1, kind: 'wholeCube', layerSize: 0 }
+    : activeAnim ? { t: +activeAnim.t.toFixed(3), dur: activeAnim.duration,
+      kind: activeAnim.wholeCube ? 'wholeCube' : 'layer',
+      layerSize: activeAnim.layer?.length ?? 0,
+      turns: activeAnim.wholeCube ? null : +(activeAnim.total / (Math.PI / 2)).toFixed(2),
+      visualKey: activeAnim.visualKey } : null,
+  frameQuarters,
+  presentationYaw: cubeGroup.rotation.y,
+  presentationQuaternion: cubeGroup.quaternion.toArray().map(v => +v.toFixed(4)),
+  rigidTurnsStarted,
+  rigidTurnsCompleted,
+  layerTurnsStarted,
+  cubeSnapshotCorrections,
+});
+window.__sceneDebug = () => {
+  const box = (o) => { const b = new THREE.Box3().setFromObject(o); return {
+    min: b.min.toArray().map(v => +v.toFixed(3)), max: b.max.toArray().map(v => +v.toFixed(3)) }; };
+  const out = {
+    grips: {}, cube: box(cubeGroup),
+    camera: camera.position.toArray().map(v => +v.toFixed(3)),
+  };
+  for (const n of GRIP_ORDER) if (grips[n]) out.grips[n] = box(grips[n].spinner);
+  return out;
+};
+window.__cubies = () => cubies.map(c => {
+  const q = c.quaternion;
+  const basis = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+    .map(v => new THREE.Vector3(...v).applyQuaternion(q).toArray()
+      .map(k => Math.round(k * 10) / 10));
+  return {
+    p: [c.position.x, c.position.y, c.position.z].map(v => Math.round(v / SPACING)),
+    m: basis,
+  };
+});
+window.__facelets = () => collectFacelets();
+window.__forceGrip = (progress, angle = Math.PI / 2) => {
+  for (const n of GRIP_ORDER) if (grips[n]) applyGripperPose(grips[n], progress, angle);
+  return window.__sceneDebug();
+};
+
+/* ---------- view gizmo (Blender-style axis picker) ---------- */
+const GIZMO_AXES = [
+  { v: [1, 0, 0], label: 'X', pos: true, view: { theta: Math.PI / 2, phi: Math.PI / 2 } },
+  { v: [-1, 0, 0], label: '−X', pos: false, view: { theta: -Math.PI / 2, phi: Math.PI / 2 } },
+  { v: [0, 1, 0], label: 'Y', pos: true, view: { theta: 0.001, phi: 0.08 } },
+  { v: [0, -1, 0], label: '−Y', pos: false, view: { theta: 0.001, phi: Math.PI - 0.08 } },
+  { v: [0, 0, 1], label: 'Z', pos: true, view: { theta: 0.001, phi: Math.PI / 2 } },
+  { v: [0, 0, -1], label: '−Z', pos: false, view: { theta: Math.PI, phi: Math.PI / 2 } },
+];
+const gizmo = document.getElementById('viewGizmo');
+let gizmoTween = null;
+
+function drawGizmo() {
+  const ctx = gizmo.getContext('2d');
+  ctx.clearRect(0, 0, 110, 110);
+  const cx = 55, cy = 55;
+  // camera basis from orbit angles
+  const sp = new THREE.Spherical(1, orbit.phi, orbit.theta);
+  const camDir = new THREE.Vector3().setFromSpherical(sp); // toward camera
+  const right = new THREE.Vector3().crossVectors(new THREE.Vector3(0, 1, 0), camDir).normalize();
+  const up = new THREE.Vector3().crossVectors(camDir, right).normalize();
+  for (const ax of GIZMO_AXES) {
+    const v = new THREE.Vector3(...ax.v);
+    const x = cx + v.dot(right) * 38;
+    const y = cy - v.dot(up) * 38;
+    const depth = v.dot(camDir);
+    ctx.beginPath(); ctx.arc(x, y, 9, 0, Math.PI * 2);
+    ctx.fillStyle = ax.v[1] ? '#7ec97e' : ax.v[0] ? '#e57373' : '#6fa8ff';
+    if (!ax.pos) ctx.fillStyle += '88';
+    ctx.fill();
+    if (depth > 0) ctx.strokeStyle = '#fff'; else ctx.strokeStyle = '#00000000';
+    ctx.lineWidth = depth > 0 ? 2 : 0; ctx.stroke();
+    ctx.fillStyle = depth > 0 ? '#0d1117' : '#d7e0ec';
+    ctx.font = 'bold 10px system-ui'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(ax.label, x, y + 0.5);
+  }
+}
+
+gizmo.addEventListener('click', e => {
+  const rect = gizmo.getBoundingClientRect();
+  const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+  const sp = new THREE.Spherical(1, orbit.phi, orbit.theta);
+  const camDir = new THREE.Vector3().setFromSpherical(sp);
+  const right = new THREE.Vector3().crossVectors(new THREE.Vector3(0, 1, 0), camDir).normalize();
+  const up = new THREE.Vector3().crossVectors(camDir, right).normalize();
+  let best = null, bestD = 16;
+  for (const ax of GIZMO_AXES) {
+    const v = new THREE.Vector3(...ax.v);
+    const d = Math.hypot(mx - (55 + v.dot(right) * 38), my - (55 - v.dot(up) * 38));
+    if (d < bestD) { bestD = d; best = ax; }
+  }
+  if (best) {
+    // shortest angular path for theta
+    let t = best.view.theta;
+    while (t - orbit.theta > Math.PI) t -= Math.PI * 2;
+    while (t - orbit.theta < -Math.PI) t += Math.PI * 2;
+    gizmoTween = {
+      fromT: orbit.theta, toT: t,
+      fromP: orbit.phi, toP: best.view.phi,
+      t: 0, duration: 0.45,
+    };
+  }
+});
+
+function tickGizmoTween(dt) {
+  if (!gizmoTween) return;
+  gizmoTween.t += dt;
+  const k = Math.min(1, gizmoTween.t / gizmoTween.duration);
+  const eased = k < 0.5 ? 2 * k * k : 1 - (-2 * k + 2) ** 2 / 2;
+  orbit.theta = gizmoTween.fromT + (gizmoTween.toT - gizmoTween.fromT) * eased;
+  orbit.phi = gizmoTween.fromP + (gizmoTween.toP - gizmoTween.fromP) * eased;
+  if (k >= 1) gizmoTween = null;
+}
+
+/* protocol enum names for human-readable logs */
+const REJECT_NAMES = [
+  'controller is in a wrong state', 'stand position unknown', 'stand pose mismatch',
+  'no cube session', 'session id mismatch', 'no scan result',
+  'scan revision mismatch', 'no solution computed', 'solution mismatch',
+  'another operation is already running', 'invalid payload', 'unsupported command',
+];
+
 async function command(body) {
-  const res = await fetch('/command', {
+  const name = body.command;
+  const res = await fetch(sessionUrl('/command'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
   const json = await res.json().catch(() => ({ ok: false, error: 'bad response' }));
-  if (!json.ok) log(`command error: ${json.error ?? res.status}`, 'er');
-  else log(`response ${JSON.stringify(json.response)}`);
+  if (!json.ok) {
+    log(`${name} ✗ ${json.error ?? res.status}`, 'er');
+  } else {
+    const r = json.response;
+    if (name === 'load_scramble' && r.cube) {
+      if (activeAnim?.wholeCube) activeAnim = null;
+      else if (activeAnim) finishAnim();
+      animQueue.length = 0;
+      pendingCubeSnapshot = null;
+      serverVisualMove = null;
+      serverRigidTurn = null;
+      cubeGroup.quaternion.identity();
+      applyServerCube(r.cube, false);
+    }
+    if (r.operation_id != null) {
+      const opId = r.operation_id;
+      log(`${name} ✓ accepted${opId != null ? ` as operation #${opId}` : ''}`);
+    } else if (r.reason != null) {
+      const reason = REJECT_NAMES[r.reason] ?? `reason ${r.reason}`;
+      log(`${name} ✗ rejected — ${reason}`, 'er');
+    } else {
+      log(`${name} ✓`);
+    }
+  }
   refreshButtons(json.ok ? json.response?.payload?.controller : undefined);
   return json;
 }
 
-const sessionId = () => Number(document.getElementById('sessionId').value) || 1;
+/* the protocol tracks the active session itself; the UI just reads it */
+function requireSession() {
+  const s = lastStatus?.cube_session?.id;
+  if (s == null) {
+    log('✗ no cube in the stand — press Grip first', 'er');
+    return null;
+  }
+  return s;
+}
+
 document.getElementById('btnRecover').onclick = () => command({ command: 'recover' });
 document.getElementById('btnGrip').onclick = () => command({ command: 'grip' });
 document.getElementById('btnAbort').onclick = () => command({ command: 'abort' });
-document.getElementById('btnOpen').onclick = () => command({ command: 'open', session_id: sessionId() });
-document.getElementById('btnScan').onclick = () => command({ command: 'scan', session_id: sessionId() });
+document.getElementById('btnOpen').onclick = () => {
+  const sid = requireSession();
+  if (sid != null) command({ command: 'open', session_id: sid });
+};
+document.getElementById('btnScan').onclick = () => {
+  const sid = requireSession();
+  if (sid != null) command({ command: 'scan', session_id: sid });
+};
 document.getElementById('btnSolve').onclick = () => {
+  const sid = requireSession(); if (sid == null) return;
   const rev = lastStatus?.scan?.revision;
-  if (rev == null) return log('no scan revision yet', 'er');
-  command({ command: 'solve', session_id: sessionId(), scan_revision: rev });
+  if (rev == null) return log('✗ nothing to solve — run Scan first', 'er');
+  command({ command: 'solve', session_id: sid, scan_revision: rev });
 };
 document.getElementById('btnExecute').onclick = () => {
+  const sid = requireSession(); if (sid == null) return;
   const rev = lastStatus?.scan?.revision, sol = lastStatus?.solution;
-  if (rev == null || sol?.id == null) return log('need scan revision and solution id', 'er');
-  setExpectedMoves(sol.moves.slice(0, sol.move_count)
-    .map(m => ({ face: FACE_LETTER[m.face], turns: [1, -1, 2][m.turn] })));
-  command({ command: 'execute', session_id: sessionId(), scan_revision: rev, solution_id: sol.id });
+  if (rev == null || sol?.id == null) return log('✗ no solution — run Solve first', 'er');
+  command({ command: 'execute', session_id: sid, scan_revision: rev, solution_id: sol.id });
 };
 document.getElementById('btnAuto').onclick = () => {
-  setExpectedMoves([]); // filled from the solution once solving finishes
-  command({ command: 'auto', session_id: sessionId() });
+  const sid = requireSession(); if (sid == null) return;
+  command({ command: 'auto', session_id: sid });
 };
 document.getElementById('btnMoves').onclick = () => {
   const sequence = document.getElementById('movesInput').value.trim();
   if (!sequence) return;
   const moves = parseMoves(sequence);
   if (!moves) return log(`invalid move sequence: ${sequence}`, 'er');
-  setExpectedMoves(moves);
-  command({ command: 'moves', session_id: sessionId(), sequence });
+  const sid = requireSession(); if (sid == null) return;
+  command({ command: 'moves', session_id: sid, sequence });
+};
+document.getElementById('btnLoadScramble').onclick = () => {
+  const sequence = document.getElementById('movesInput').value.trim();
+  if (!sequence) return;
+  if (!parseMoves(sequence)) return log(`invalid scramble: ${sequence}`, 'er');
+  command({ command: 'load_scramble', sequence });
 };
 
 function parseMoves(text) {
   const moves = [];
-  for (const token of text.split(/[\s,]+/).filter(Boolean)) {
-    const m = /^([URFDLB])(2|'|'2|2')?$/.exec(token);
-    if (!m) return null;
-    moves.push({ face: m[1], turns: m[2]?.includes('2') ? 2 : m[2] ? 1 : -1 });
+  const compact = text.toUpperCase().replace(/[\s,]+/g, '');
+  for (let index = 0; index < compact.length;) {
+    const face = compact[index++];
+    if (!FACE_NORMAL[face]) return null;
+    let suffix = '';
+    if (index < compact.length && /[123']/.test(compact[index])) {
+      suffix = compact[index++];
+      if (suffix === '2' && compact[index] === "'") index++; // R2' = R2
+    }
+    moves.push({
+      face,
+      turns: suffix === '2' ? 2 : (suffix === '3' || suffix === "'") ? 1 : -1,
+    });
   }
-  return moves;
+  return moves.length ? moves : null;
 }
 
 function refreshButtons(controllerState) {
   const busy = controllerState === 2 || controllerState === 0;
-  for (const id of ['btnOpen', 'btnScan', 'btnSolve', 'btnExecute', 'btnAuto', 'btnMoves', 'btnGrip'])
+  for (const id of ['btnOpen', 'btnScan', 'btnSolve', 'btnExecute', 'btnAuto',
+                    'btnMoves', 'btnLoadScramble', 'btnGrip'])
     document.getElementById(id).disabled = busy;
   document.getElementById('btnAbort').disabled = !busy;
 }
@@ -558,13 +919,17 @@ const tbody = document.querySelector('#axisTable tbody');
 for (let i = 0; i < 4; i++) {
   const tr = document.createElement('tr');
   tr.innerHTML = `<td>${AXIS_NAMES[i]}</td><td class="cur">—</td><td class="tgt">—</td>
-    <td><div class="bar"><i></i></div></td>`;
+    <td><div class="bar"><i></i></div></td>
+    <td class="claw-cur">—</td>
+    <td><div class="bar claw"><i style="background:var(--ok)"></i></div></td>`;
   tbody.appendChild(tr);
 }
 
 const MOTION = ['?', 'stable', 'moving'];
-function renderStatus(status, railsProgress, gripperAngle) {
+function renderStatus(status, railsProgress, gripperAngle, gripperProgress, lastSolution,
+                      serverAnimationSpeed) {
   lastStatus = status;
+  if (serverAnimationSpeed) showAnimationSpeed(serverAnimationSpeed);
   const ctrl = CTRL_NAMES[status.controller] ?? status.controller;
   setBadge('ctrlBadge', ctrl, status.controller === 1 ? 'ok' : status.controller === 4 ? 'err' : 'warn');
   const pose = POSE_NAMES[status.stand.pose.kind] ?? status.stand.pose.kind;
@@ -579,7 +944,20 @@ function renderStatus(status, railsProgress, gripperAngle) {
     cells[2].textContent = rail.target === RAIL_GRIP ? 'grip' : rail.target === RAIL_OPEN ? 'open' : '?';
     if (MOTION[rail.motion] === 'moving') cells[2].textContent += ' ⟳';
     rows[i].querySelector('.bar > i').style.width = `${Math.round((railsProgress?.[i] ?? 0) * 100)}%`;
-    void grip; void gripperAngle;
+    // claw column: orientation letter + motion progress
+    const clawName = ['∥', '⟂', '∥¹⁸⁰'][grip.current ?? 1] ?? '?';
+    let clawTxt = clawName;
+    if (MOTION[grip.motion] === 'moving' && grip.target != null) {
+      clawTxt = `→ ${['∥', '⟂', '∥¹⁸⁰'][grip.target]}`;
+    }
+    rows[i].cells[4].textContent = clawTxt;
+    rows[i].querySelector('.bar.claw > i').style.width =
+      `${Math.round((gripperProgress?.[i] ?? 1) * 100)}%`;
+    applyGripperPose(
+      grips[GRIP_ORDER[i]],
+      railsProgress?.[i] ?? 0,
+      gripperAngle?.[i] ?? Math.PI / 2,
+    );
   }
   document.getElementById('outputsVal').textContent = status.stand.outputs_enabled ? 'enabled' : 'off';
 
@@ -591,18 +969,63 @@ function renderStatus(status, railsProgress, gripperAngle) {
   for (let f = 0; f < 6; f++) if (scan.scanned_faces & (1 << f)) done.push(FACE_LETTER[f]);
   document.getElementById('scanFaces').textContent = done.join(' ') || '—';
 
-  const sol = status.solution;
+  const activeSol = status.solution;
+  const showingPrevious = !activeSol.move_count && !!lastSolution?.move_count;
+  const sol = showingPrevious ? lastSolution : activeSol;
   document.getElementById('solState').textContent =
-    ['none', 'solving', 'ready', 'executing', 'completed'][sol.state] ?? sol.state;
+    showingPrevious ? 'last completed' :
+      (['none', 'solving', 'ready', 'executing', 'completed'][sol.state] ?? sol.state);
   document.getElementById('solProg').textContent =
     sol.id != null ? `#${sol.id}: ${sol.completed_moves}/${sol.move_count}` : '—';
   renderMoves(sol);
 
-  // camera snapping during scans
-  if (status.stand.pose.kind === 3 && camFace != null && !dragging) snapCameraTo(FACE_LETTER[camFace]);
+  // CameraHelper is a wireframe debugging aid, not robot geometry. Keeping it
+  // hidden avoids one-frame line artifacts around each capture.
+  scanHelper.visible = false;
+
+  // reset the unfold when a new scan starts
+  if (scan.state === 1 && unfoldScanId !== scan.revision) {
+    unfoldScanId = scan.revision;
+    for (const f of scanNet) f.fill(null);
+    drawUnfold();
+    setBadge('scanBadge', 'scan: scanning…', 'flash');
+  } else if (scan.state === 2) {
+    setBadge('scanBadge', `scan: valid · ${popcount(scan.scanned_faces)}/6`, 'ok');
+  } else if (scan.state === 3) {
+    setBadge('scanBadge', 'scan: invalid', 'err');
+  }
 
   refreshButtons(status.controller);
 }
+
+function popcount(mask) {
+  let n = 0;
+  while (mask) { mask &= mask - 1; n++; }
+  return n;
+}
+
+/* ---------- unfold (scanner view, top-right) ---------- */
+let unfoldScanId = null;
+const scanNet = Array.from({ length: 6 }, () => Array(9).fill(null));
+// face index -> [col,row] in a U-top / L F R B / D-bottom net
+const NET_POS = [[1, 0], [2, 1], [1, 1], [1, 2], [0, 1], [3, 1]];
+function drawUnfold() {
+  const cv = document.getElementById('unfold');
+  const ctx = cv.getContext('2d');
+  const cell = 30;
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  for (let face = 0; face < 6; face++) {
+    const [col, row] = NET_POS[face];
+    for (let i = 0; i < 9; i++) {
+      const c = scanNet[face][i];
+      ctx.fillStyle = c == null ? '#232b38' : STICKER_HEX[c];
+      ctx.fillRect(col * cell + (i % 3) * 10 + 1, row * cell + Math.floor(i / 3) * 10 + 1, 8, 8);
+      ctx.strokeStyle = '#39445c';
+      ctx.strokeRect(col * cell + (i % 3) * 10 + 0.5, row * cell + Math.floor(i / 3) * 10 + 0.5, 9, 9);
+    }
+  }
+}
+drawUnfold();
 
 let moveChipsFor = null;
 function renderMoves(sol) {
@@ -648,13 +1071,17 @@ function escapeHtml(s) {
 
 /* ---------- SSE ---------- */
 const collisionActive = {};
+let pendingCubeSnapshot = null;
+let cubeSnapshotCorrections = 0;
 function handleServerMessage(msg) {
   switch (msg.type) {
     case 'status':
-      feedOracle(msg.status);
-      renderStatus(msg.status, msg.rails_progress, msg.gripper_angle);
+      feedServerVisual(msg.visual);
+      renderStatus(msg.status, msg.rails_progress, msg.gripper_angle,
+        msg.gripper_progress, msg.last_solution, msg.animation_speed);
       break;
     case 'event': handleEvent(msg.opcode, msg.payload); break;
+    case 'cube': pendingCubeSnapshot = msg.cube; break;
     case 'collision': handleCollision(msg); break;
   }
 }
@@ -667,24 +1094,24 @@ function handleEvent(opcode, p) {
     OperationFailed: 0x2009, Fault: 0x20ff,
   };
   if (opcode === EV.FaceScanned) {
-    log(`face scanned: ${FACE_LETTER[p.face]} (${COLOR_NAME[p.recognized.colors[4]]} center), ` +
-      `${p.scanned_faces}/6`);
-    paintFace(p.face, p.recognized.colors);
-    const flash = document.getElementById('scanFlash');
-    flash.style.opacity = 1;
-    setTimeout(() => flash.style.opacity = 0, 160);
-    if (!dragging) snapCameraTo(FACE_LETTER[p.face]);
+    const doneCount = [...Array(6).keys()].filter(f => p.scanned_faces & (1 << f)).length;
+    scanNet[p.face] = [...p.recognized.colors];
+    drawUnfold();
+    const letter = FACE_LETTER[p.face];
+    log(`📸 scanned face ${letter}: center is ${COLOR_NAME[p.recognized.colors[4]]}, ` +
+      `${doneCount} of 6 faces done`);
+    setBadge('scanBadge', `scan: 📸 ${letter} · ${doneCount}/6`, 'flash');
   } else if (opcode === EV.OperationCompleted) {
-    log(`operation completed: ${OP_KIND[p.kind] ?? p.kind}`);
+    log(`${OP_KIND[p.kind] ?? p.kind} operation completed`);
   } else if (opcode === EV.OperationFailed) {
-    log(`operation failed: ${JSON.stringify(p)}`, 'er');
+    log(`${OP_KIND[p.kind] ?? 'operation'} failed${p.reason != null ? `: ${REJECT_NAMES[p.reason] ?? 'reason ' + p.reason}` : ''}`, 'er');
   } else if (opcode === EV.Aborted) {
-    log(`aborted: ${JSON.stringify(p)}`, 'er');
+    log(`operation aborted by user`, 'er');
   } else if (opcode === EV.Fault) {
-    log(`FAULT: ${JSON.stringify(p)}`, 'er');
+    log(`FAULT: stand needs attention (${p.code ?? JSON.stringify(p)})`, 'er');
   } else if (opcode === EV.CubeSessionChanged) {
-    if (p.session) log(`cube session #${p.session.id} opened`);
-    else log('cube session closed');
+    if (p.session) log(`cube placed in the stand — session #${p.session.id} started`);
+    else log('cube removed — session closed');
   }
 }
 
@@ -697,7 +1124,7 @@ function handleCollision(msg) {
 }
 
 function connectEvents() {
-  const es = new EventSource('/events');
+  const es = new EventSource(sessionUrl('/events'));
   es.onopen = () => setBadge('connBadge', 'connected', 'ok');
   es.onerror = () => {
     setBadge('connBadge', 'reconnecting…', 'err');
@@ -717,28 +1144,43 @@ function tick(now) {
 
   startNextAnim();
   if (activeAnim) {
-    activeAnim.t += dt;
+    if (!activeAnim.serverDriven) activeAnim.t += dt;
     const k = Math.min(1, activeAnim.t / activeAnim.duration);
-    const eased = k < 0.5 ? 2 * k * k : 1 - (-2 * k + 2) ** 2 / 2;
+    const eased = activeAnim.serverDriven
+      ? k
+      : (k < 0.5 ? 2 * k * k : 1 - (-2 * k + 2) ** 2 / 2);
     if (activeAnim.wholeCube) {
-      const target = activeAnim.toRotated ? Math.PI / 2 : 0;
-      const from = activeAnim.toRotated ? 0 : Math.PI / 2;
-      cubeGroup.rotation.y = from + (target - from) * eased;
-      if (k >= 1) { cubeGroup.rotation.y = target; activeAnim = null; }
+      // quaternion slerp — no Euler flips
+      cubeGroup.quaternion.slerpQuaternions(activeAnim.qFrom, activeAnim.qTo, eased);
+      if (k >= 1) { cubeGroup.quaternion.copy(activeAnim.qTo); activeAnim = null; }
     } else {
       activeAnim.pivot.setRotationFromAxisAngle(activeAnim.worldNormal, activeAnim.total * eased);
       if (k >= 1) finishAnim();
     }
   }
 
-  if (!orbit.snapped && !dragging) applyCamera();
+  if (!activeAnim && animQueue.length === 0 && pendingCubeSnapshot) {
+    const snapshot = pendingCubeSnapshot;
+    pendingCubeSnapshot = null;
+    applyServerCube(snapshot);
+  }
+
+  if (!dragging) tickGizmoTween(dt);
+  // Pointer events update orbit angles; apply them while the button remains
+  // held so manual dragging is rendered continuously instead of on release.
+  applyCamera();
+  drawGizmo();
   renderer.render(scene, camera);
   requestAnimationFrame(tick);
 }
 
 resize();
-resetCube();
+await restoreCubeState();
 applyCamera();
+loadSTL('/gripper.stl').then(geometry => {
+  buildGrippers(geometry);
+  for (const name of GRIP_ORDER) applyGripperPose(grips[name], 0, Math.PI / 2);
+});
 connectEvents();
 requestAnimationFrame(tick);
 log('simulator UI ready');
