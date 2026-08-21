@@ -80,6 +80,8 @@ min2phase = { git = "https://github.com/cs0x7f/min2phase_rust.git", rev = "56ce7
 i2cdev = { version = "0.6.2", optional = true }
 rubik-link-protocol = { path = "crates/rubik-link-protocol" }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tiny_http = "0.12"
 toml = "0.8"
 
 [build-dependencies]

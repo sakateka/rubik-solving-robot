@@ -38,7 +38,7 @@ Flush = regrip гриппера в perpendicular: open rail → ⊥ → close ra
   для всех 4-ходовых последовательностей (104 976 комбинаций).
 - [x] Frame-tracking через U/D между F/B-блоками.
 - [x] `Finish::Release` и execute-путь без финального restore/flush.
-- [ ] Cube20 benchmark после завершения оптимизаций.
+- [x] Cube20 benchmark после завершения оптимизаций.
 
 ### 1. Frame-tracking планировщик
 

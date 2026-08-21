@@ -19,6 +19,8 @@ pub mod robot_daemon;
 pub mod robot_link;
 #[cfg(feature = "pca9685")]
 pub mod robot_service;
+#[cfg(feature = "pca9685")]
+pub mod sim_server;
 pub mod stand;
 #[cfg(feature = "pca9685")]
 pub mod stand_runtime;

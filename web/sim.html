@@ -1,0 +1,747 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rubik Robot Simulator</title>
+<style>
+  :root {
+    --bg: #10141a; --panel: #171d26; --panel2: #1e2632; --line: #2a3547;
+    --text: #d7e0ec; --dim: #8494ab; --accent: #4da3ff; --ok: #37c978;
+    --warn: #ffb020; --err: #ff4d5e;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 13px/1.45 system-ui, sans-serif; }
+  #app { display: grid; grid-template-columns: 1fr 360px; height: 100vh; }
+  #stage { position: relative; min-width: 0; }
+  canvas { display: block; }
+  #hud { position: absolute; top: 10px; left: 12px; display: flex; gap: 8px; align-items: center; }
+  .badge { padding: 3px 10px; border-radius: 999px; background: var(--panel);
+    border: 1px solid var(--line); font-weight: 600; }
+  .badge.ok { color: var(--ok); } .badge.err { color: var(--err); } .badge.warn { color: var(--warn); }
+  #collisionVignette { position: absolute; inset: 0; pointer-events: none; opacity: 0;
+    transition: opacity .25s; box-shadow: inset 0 0 120px 30px rgba(255,40,60,.55); }
+  #collisionVignette.active { opacity: 1; }
+  #scanFlash { position: absolute; inset: 0; pointer-events: none; opacity: 0;
+    background: rgba(80,170,255,.18); transition: opacity .15s; }
+  aside { background: var(--panel); border-left: 1px solid var(--line); overflow-y: auto; padding: 14px; }
+  h1 { font-size: 15px; margin: 0 0 10px; }
+  h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim);
+    margin: 18px 0 6px; }
+  .row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; }
+  button { background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+    border-radius: 6px; padding: 6px 10px; cursor: pointer; font-weight: 600; }
+  button:hover { border-color: var(--accent); }
+  button:disabled { opacity: .4; cursor: default; }
+  input { background: #0d1117; color: var(--text); border: 1px solid var(--line);
+    border-radius: 6px; padding: 5px 8px; width: 100%; }
+  label { color: var(--dim); font-size: 11px; }
+  table { width: 100%; border-collapse: collapse; }
+  td, th { padding: 3px 6px; border-bottom: 1px solid var(--line); text-align: left; }
+  th { color: var(--dim); font-weight: 600; }
+  .bar { height: 6px; background: #0d1117; border-radius: 3px; overflow: hidden; width: 70px; }
+  .bar > i { display: block; height: 100%; background: var(--accent); width: 0; }
+  #log { font-family: ui-monospace, monospace; font-size: 11px; max-height: 260px; overflow-y: auto;
+    background: #0d1117; border: 1px solid var(--line); border-radius: 6px; padding: 6px; }
+  #log .t { color: var(--dim); } #log .ev { color: var(--accent); }
+  #log .col { color: var(--err); font-weight: 700; } #log .er { color: var(--err); }
+  #moves { display: flex; flex-wrap: wrap; gap: 4px; }
+  .mv { padding: 2px 7px; border-radius: 4px; background: var(--panel2); border: 1px solid var(--line);
+    font-family: ui-monospace, monospace; }
+  .mv.done { opacity: .35; } .mv.next { border-color: var(--accent); color: var(--accent); }
+  .kv { display: flex; justify-content: space-between; padding: 2px 0; }
+  .kv b { font-weight: 600; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage">
+    <div id="hud">
+      <span class="badge" id="connBadge">connecting…</span>
+      <span class="badge" id="ctrlBadge">—</span>
+      <span class="badge" id="poseBadge">—</span>
+      <span class="badge" id="frameBadge">frame: canonical</span>
+    </div>
+    <div id="collisionVignette"></div>
+    <div id="scanFlash"></div>
+  </div>
+  <aside>
+    <h1>Rubik Robot — Simulator</h1>
+
+    <h2>Session</h2>
+    <div class="row">
+      <div style="flex:1"><label>session id</label><input id="sessionId" type="number" value="1"></div>
+    </div>
+    <div class="row">
+      <button id="btnRecover">Recover→Open</button>
+      <button id="btnGrip">Grip</button>
+      <button id="btnAbort">Abort</button>
+    </div>
+    <div class="row">
+      <button id="btnOpen">Open</button>
+      <button id="btnScan">Scan</button>
+      <button id="btnSolve">Solve</button>
+      <button id="btnExecute">Execute</button>
+      <button id="btnAuto">Auto scan-solve-execute</button>
+    </div>
+    <div class="row">
+      <input id="movesInput" placeholder="moves, e.g. R U R' U'" style="flex:1">
+      <button id="btnMoves">Run moves</button>
+    </div>
+
+    <h2>Stand</h2>
+    <table id="axisTable">
+      <thead><tr><th>axis</th><th>current</th><th>target</th><th>progress</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="kv"><span>outputs</span><b id="outputsVal">—</b></div>
+
+    <h2>Scan</h2>
+    <div class="kv"><span>state</span><b id="scanState">—</b></div>
+    <div class="kv"><span>revision</span><b id="scanRev">—</b></div>
+    <div class="kv"><span>faces done</span><b id="scanFaces">—</b></div>
+
+    <h2>Solution</h2>
+    <div class="kv"><span>state</span><b id="solState">—</b></div>
+    <div class="kv"><span>id / progress</span><b id="solProg">—</b></div>
+    <div id="moves"></div>
+
+    <h2>Event log</h2>
+    <div id="log"></div>
+  </aside>
+</div>
+
+<script type="importmap">
+{ "imports": { "three": "/three.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* ---------- constants ---------- */
+const AXIS_NAMES = ['left', 'right', 'top', 'bottom'];
+const RAIL_OPEN = 0, RAIL_GRIP = 1;
+const GRIP_PARALLEL = 0, GRIP_PERP = 1, GRIP_PARALLEL_REV = 2;
+const POSE_NAMES = ['unknown', 'open', 'canonical-grip', 'scan-pose', 'move-pose', 'transitional'];
+const CTRL_NAMES = ['booting', 'ready', 'busy', 'aborted', 'faulted'];
+const OP_KIND = ['grip', 'scan', 'solve', 'execute', 'auto', 'open', 'recover', 'moves'];
+const FACE_LETTER = ['U', 'R', 'F', 'D', 'L', 'B'];
+const FACE_NORMAL = {
+  U: [0, 1, 0], R: [1, 0, 0], F: [0, 0, 1],
+  D: [0, -1, 0], L: [-1, 0, 0], B: [0, 0, -1],
+};
+const STICKER_HEX = ['#f6f6f6', '#ffd500', '#b71234', '#ff5800', '#009b48', '#0046ad'];
+const COLOR_NAME = ['white', 'yellow', 'red', 'orange', 'green', 'blue'];
+
+/* ---------- three.js scene ---------- */
+const stage = document.getElementById('stage');
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+stage.prepend(renderer.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color('#0b0e13');
+const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 200);
+
+function resize() {
+  const w = stage.clientWidth, h = stage.clientHeight;
+  renderer.setSize(w, h);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+addEventListener('resize', resize);
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+const sun = new THREE.DirectionalLight(0xffffff, 1.4);
+sun.position.set(6, 10, 7);
+scene.add(sun);
+const fill = new THREE.DirectionalLight(0x88aaff, 0.35);
+fill.position.set(-7, 4, -6);
+scene.add(fill);
+
+const grid = new THREE.GridHelper(24, 24, 0x223047, 0x161d29);
+grid.position.y = -3.2;
+scene.add(grid);
+
+/* orbit */
+const orbit = { theta: Math.PI * 0.28, phi: Math.PI * 0.36, radius: 13, target: new THREE.Vector3(0, 0, 0), snapped: false };
+function applyCamera() {
+  const sp = new THREE.Spherical(orbit.radius, orbit.phi, orbit.theta);
+  camera.position.setFromSpherical(sp).add(orbit.target);
+  camera.lookAt(orbit.target);
+}
+let dragging = null;
+renderer.domElement.addEventListener('pointerdown', e => { dragging = e; orbit.snapped = false; });
+addEventListener('pointermove', e => {
+  if (!dragging) return;
+  orbit.theta -= e.movementX * 0.006;
+  orbit.phi = Math.min(Math.PI - 0.05, Math.max(0.05, orbit.phi - e.movementY * 0.006));
+});
+addEventListener('pointerup', () => dragging = null);
+renderer.domElement.addEventListener('wheel', e => {
+  e.preventDefault();
+  orbit.radius = Math.min(40, Math.max(5, orbit.radius * (1 + Math.sign(e.deltaY) * 0.08)));
+}, { passive: false });
+
+function snapCameraTo(faceLetter) {
+  const d = 11;
+  const dirs = {
+    F: [0, 0, d], B: [0, 0, -d], L: [-d, 0, 0], R: [d, 0, 0],
+    U: [0, d, 0.001], D: [0, -d, 0.001],
+  };
+  const [x, y, z] = dirs[faceLetter];
+  camera.position.set(x, y, z);
+  camera.up.set(0, 1, 0);
+  if (faceLetter === 'U' || faceLetter === 'D') camera.up.set(0, 0, faceLetter === 'U' ? -1 : 1);
+  camera.lookAt(0, 0, 0);
+  orbit.snapped = true;
+}
+
+/* stand geometry */
+const metal = new THREE.MeshStandardMaterial({ color: 0x39465c, roughness: 0.55, metalness: 0.65 });
+const darkMetal = new THREE.MeshStandardMaterial({ color: 0x232c3b, roughness: 0.7, metalness: 0.5 });
+const clawMat = new THREE.MeshStandardMaterial({ color: 0xcfd8e6, roughness: 0.35, metalness: 0.75 });
+
+const CUBE_HALF = 1.56;
+const RAIL_REACH_OPEN = 4.4, RAIL_REACH_GRIP = 2.35;
+
+function makeRail(axis) {
+  const g = new THREE.Group();
+  const horizontal = axis === 'left' || axis === 'right';
+  const sign = axis === 'left' || axis === 'bottom' ? -1 : 1;
+  const beamLen = 3.4;
+  const beam = new THREE.Mesh(new THREE.BoxGeometry(horizontal ? beamLen : 0.5, horizontal ? 0.5 : beamLen, 0.5), metal);
+  const beamCenter = RAIL_REACH_GRIP + beamLen / 2 - 0.4;
+  if (horizontal) beam.position.set(sign * beamCenter, 0, 0); else beam.position.set(0, sign * beamCenter, 0);
+  g.add(beam);
+  const carriage = new THREE.Mesh(new THREE.BoxGeometry(horizontal ? 0.7 : 0.62, horizontal ? 0.62 : 0.7, 0.62), darkMetal);
+  g.add(carriage);
+  const claw = new THREE.Group();
+  for (const off of [-0.52, 0.52]) {
+    const prong = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.16, 1.15), clawMat);
+    prong.position.set(0, off, 0.72);
+    claw.add(prong);
+  }
+  const palm = new THREE.Mesh(new THREE.BoxGeometry(0.34, 1.25, 0.2), clawMat);
+  palm.position.set(0, 0, 0.12);
+  claw.add(palm);
+  carriage.add(claw);
+  g.userData = { axis, horizontal, sign, carriage, claw };
+  scene.add(g);
+  return g;
+}
+const rails = Object.fromEntries(['left', 'right', 'top', 'bottom'].map(makeRail));
+
+function applyRailPose(rail, progress, gripAngleRad) {
+  const { horizontal, sign, carriage, claw } = rail.userData;
+  const reach = RAIL_REACH_OPEN + (RAIL_REACH_GRIP - RAIL_REACH_OPEN) * progress;
+  if (horizontal) carriage.position.set(sign * reach, 0, 0);
+  else carriage.position.set(0, sign * reach, 0);
+  claw.rotation.x = gripAngleRad;
+  if (!horizontal) claw.rotation.y = sign > 0 ? 0 : Math.PI;
+}
+
+/* cube */
+const SPACING = 1.04;
+const cubies = [];
+const bodyMat = new THREE.MeshStandardMaterial({ color: 0x0a0a0a, roughness: 0.4 });
+const stickerMats = STICKER_HEX.map(hex => new THREE.MeshStandardMaterial({ color: hex, roughness: 0.28 }));
+const cubeGroup = new THREE.Group();
+scene.add(cubeGroup);
+
+for (let x = -1; x <= 1; x++) for (let y = -1; y <= 1; y++) for (let z = -1; z <= 1; z++) {
+  if (!x && !y && !z) continue;
+  const cubie = new THREE.Group();
+  cubie.position.set(x * SPACING, y * SPACING, z * SPACING);
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.98, 0.98, 0.98), bodyMat);
+  cubie.add(body);
+  const faces = [
+    [[0, 1, 0], new THREE.Vector3(0, 1, 0)], [[0, -1, 0], new THREE.Vector3(0, -1, 0)],
+    [[1, 0, 0], new THREE.Vector3(1, 0, 0)], [[-1, 0, 0], new THREE.Vector3(-1, 0, 0)],
+    [[0, 0, 1], new THREE.Vector3(0, 0, 1)], [[0, 0, -1], new THREE.Vector3(0, 0, -1)],
+  ];
+  for (const [, normal] of faces) {
+    const sticker = new THREE.Mesh(new THREE.PlaneGeometry(0.82, 0.82), stickerMats[4].clone());
+    sticker.material.color.set(0x14161a);
+    sticker.position.copy(normal).multiplyScalar(0.5);
+    sticker.lookAt(normal.clone().multiplyScalar(2));
+    sticker.userData.normal = normal.clone();
+    cubie.add(sticker);
+  }
+  cubie.userData.home = { pos: cubie.position.clone(), quat: cubie.quaternion.clone() };
+  cubeGroup.add(cubie);
+  cubies.push(cubie);
+}
+
+function resetCube() {
+  for (const c of cubies) {
+    c.position.copy(c.userData.home.pos);
+    c.quaternion.copy(c.userData.home.quat);
+  }
+  frameQuarters = 0;
+  if (typeof oracle !== 'undefined') {
+    oracle.expected = [];
+    oracle.expectedIdx = 0;
+    oracle.pending = [[], [], [], []];
+  }
+  updateFrameBadge();
+}
+
+/* layer animation */
+let frameQuarters = 0; // 0 = canonical, 1 = rotated-fb (cube yawed +90° about Y)
+const animQueue = [];
+let activeAnim = null;
+
+function rotY(v, quarters) {
+  const out = v.clone();
+  for (let i = 0; i < ((quarters % 4) + 4) % 4; i++)
+    out.set(out.z, out.y, -out.x);
+  return out;
+}
+
+function enqueueMove(faceLetter, quarterTurns /* signed int: +1 ccw, -1 cw, ±2 half */) {
+  animQueue.push({ faceLetter, quarterTurns });
+}
+
+function startNextAnim() {
+  if (activeAnim || !animQueue.length) return;
+  const { faceLetter, quarterTurns } = animQueue.shift();
+  const worldNormal = rotY(new THREE.Vector3(...FACE_NORMAL[faceLetter]), frameQuarters);
+  const layer = cubies.filter(c => c.position.dot(worldNormal) > SPACING * 1.4);
+  const pivot = new THREE.Group();
+  cubeGroup.add(pivot);
+  for (const c of layer) pivot.attach(c);
+  activeAnim = {
+    pivot, layer, worldNormal,
+    total: quarterTurns * Math.PI / 2,
+    t: 0, duration: 0.38,
+  };
+}
+
+function finishAnim() {
+  const { pivot, layer, worldNormal, total } = activeAnim;
+  pivot.setRotationFromAxisAngle(worldNormal, total);
+  pivot.updateMatrixWorld(true);
+  for (const c of layer) cubeGroup.attach(c);
+  cubeGroup.remove(pivot);
+  // quantize
+  for (const c of cubies) {
+    c.position.set(Math.round(c.position.x / SPACING) * SPACING,
+      Math.round(c.position.y / SPACING) * SPACING,
+      Math.round(c.position.z / SPACING) * SPACING);
+    const e = new THREE.Euler().setFromQuaternion(c.quaternion);
+    e.x = Math.round(e.x / (Math.PI / 2)) * Math.PI / 2;
+    e.y = Math.round(e.y / (Math.PI / 2)) * Math.PI / 2;
+    e.z = Math.round(e.z / (Math.PI / 2)) * Math.PI / 2;
+    c.quaternion.setFromEuler(e);
+  }
+  activeAnim = null;
+}
+
+/* face painting from scan results */
+function paintFace(faceIdx, colors) {
+  const letter = FACE_LETTER[faceIdx];
+  const n = new THREE.Vector3(...FACE_NORMAL[letter]);
+  let u, v;
+  switch (letter) {
+    case 'U': u = new THREE.Vector3(1, 0, 0); v = new THREE.Vector3(0, 0, 1); break;
+    case 'D': u = new THREE.Vector3(1, 0, 0); v = new THREE.Vector3(0, 0, -1); break;
+    case 'F': u = new THREE.Vector3(1, 0, 0); v = new THREE.Vector3(0, -1, 0); break;
+    case 'B': u = new THREE.Vector3(-1, 0, 0); v = new THREE.Vector3(0, -1, 0); break;
+    case 'R': u = new THREE.Vector3(0, 0, -1); v = new THREE.Vector3(0, -1, 0); break;
+    case 'L': u = new THREE.Vector3(0, 0, 1); v = new THREE.Vector3(0, -1, 0); break;
+  }
+  const q = new THREE.Quaternion(), wp = new THREE.Vector3();
+  const found = [];
+  for (const c of cubies) {
+    for (const s of c.children) {
+      if (!s.userData.normal) continue;
+      q.copy(c.quaternion);
+      const wn = s.userData.normal.clone().applyQuaternion(q);
+      if (wn.dot(n) < 0.9) continue;
+      wp.copy(s.position).applyQuaternion(q).add(c.position);
+      const col = Math.round(wp.dot(u) / SPACING) + 1;
+      const row = 1 - Math.round(wp.dot(v) / SPACING);
+      found.push({ idx: row * 3 + col, s });
+    }
+  }
+  if (found.length !== 9) return;
+  for (const { idx, s } of found) s.material.color.set(STICKER_HEX[colors[idx]] ?? 0x14161a);
+}
+
+/* ---------- SPA oracle ---------- */
+// Reconciles observed stand motion (status snapshots) against the expected
+// move queue. Physical signatures (mirroring move_planner):
+//   - whole-cube reorientation: T+B claws settle frame-parallel while LR
+//     rails are open -> frame toggles canonical <-> rotated-fb;
+//   - a quarter turn: one frame-parallel settle on the face's gripper;
+//   - a half turn: two settles (rail closes between them, so both must be
+//     collected before the move counts).
+const oracle = {
+  prevRails: [null, null, null, null],
+  prevGrippers: [null, null, null, null],
+  pending: [[], [], [], []],
+  expected: [],   // [{face: 'R', turns: -1|1|2}, ...]
+  expectedIdx: 0,
+};
+
+function oracleGate(status) {
+  const op = status.active_operation;
+  return !!op && (op.kind === 3 || op.kind === 7 || op.kind === 4);
+}
+
+function settled(axis) { return axis.motion !== 2; } // AxisMotion::Moving
+
+function setExpectedMoves(moves) {
+  oracle.expected = moves;
+  oracle.expectedIdx = 0;
+  oracle.pending = [[], [], [], []];
+}
+
+function axisFaceLetter(axis) {
+  if (axis === 2) return 'U';
+  if (axis === 3) return 'D';
+  return oracle.frame === 0 ? (axis === 0 ? 'L' : 'R') : (axis === 0 ? 'B' : 'F');
+}
+
+function feedOracle(status) {
+  const rails = status.stand.rails;
+  const grippers = status.stand.grippers;
+
+  if (!oracleGate(status)) {
+    oracle.prevRails = rails.map(r => r.current);
+    oracle.prevGrippers = grippers.map(g => g.current);
+    return;
+  }
+
+  // auto-fill expectations for auto scan-solve-execute once solved
+  if (!oracle.expected.length && status.solution.move_count &&
+      status.solution.id != null) {
+    setExpectedMoves(status.solution.moves.slice(0, status.solution.move_count)
+      .map(m => ({ face: FACE_LETTER[m.face], turns: [1, -1, 2][m.turn] })));
+  }
+
+  // reorientation: LR rails open + both T/B claws settled frame-parallel
+  const lrOpen = rails[0].current === RAIL_OPEN && rails[1].current === RAIL_OPEN;
+  const tbParallel = [2, 3].every(i =>
+    settled(grippers[i]) &&
+    (grippers[i].current === GRIP_PARALLEL || grippers[i].current === GRIP_PARALLEL_REV));
+  if (lrOpen && tbParallel) {
+    const top = grippers[2].current, bottom = grippers[3].current;
+    const detected = (top === GRIP_PARALLEL && bottom === GRIP_PARALLEL_REV) ? 1
+      : (top === GRIP_PARALLEL_REV && bottom === GRIP_PARALLEL) ? 0 : null;
+    if (detected !== null && frameQuarters !== detected) {
+      frameQuarters = detected;
+      updateFrameBadge();
+      enqueueWholeCubeRotation(detected === 1);
+      oracle.pending = [[], [], [], []];
+    }
+  }
+
+  // single-axis turn events
+  for (const axis of [0, 1, 2, 3]) {
+    const g = grippers[axis];
+    const cur = g.current;
+    if (settled(g) && (cur === GRIP_PARALLEL || cur === GRIP_PARALLEL_REV) &&
+        cur !== oracle.prevGrippers[axis] && !tbParallel) {
+      oracle.pending[axis].push(cur);
+      tryCompleteMove(axis);
+    }
+    oracle.prevRails[axis] = rails[axis].current;
+    oracle.prevGrippers[axis] = g.current;
+  }
+}
+
+function tryCompleteMove(axis) {
+  const events = oracle.pending[axis];
+  const exp = oracle.expected[oracle.expectedIdx];
+  // needed settle count: two for a half turn, one otherwise
+  const need = exp && exp.turns === 2 ? 2 : 1;
+  if (events.length < need) return;
+
+  let face, turns;
+  if (need === 2) {
+    face = axisFaceLetter(axis);
+    turns = 2;
+  } else {
+    face = axisFaceLetter(axis);
+    turns = events[0] === GRIP_PARALLEL ? 1 : -1;
+  }
+  oracle.pending[axis] = [];
+  if (exp) {
+    if (exp.face !== face || exp.turns !== turns) {
+      log(`move mismatch: expected ${exp.face}${turnName(exp.turns)}, ` +
+        `observed ${face}${turnName(turns)}`, 'er');
+    }
+    oracle.expectedIdx++;
+  }
+  enqueueMove(face, turns);
+}
+
+function turnName(turns) {
+  return turns === 2 ? '2' : turns === 1 ? "'" : '';
+}
+
+function enqueueWholeCubeRotation(toRotated) {
+  animQueue.push({ wholeCube: true, toRotated });
+}
+
+function updateFrameBadge() {
+  document.getElementById('frameBadge').textContent =
+    `frame: ${frameQuarters ? 'rotated-fb' : 'canonical'}`;
+}
+
+/* ---------- server link ---------- */
+async function command(body) {
+  const res = await fetch('/command', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const json = await res.json().catch(() => ({ ok: false, error: 'bad response' }));
+  if (!json.ok) log(`command error: ${json.error ?? res.status}`, 'er');
+  else log(`response ${JSON.stringify(json.response)}`);
+  refreshButtons(json.ok ? json.response?.payload?.controller : undefined);
+  return json;
+}
+
+const sessionId = () => Number(document.getElementById('sessionId').value) || 1;
+document.getElementById('btnRecover').onclick = () => command({ command: 'recover' });
+document.getElementById('btnGrip').onclick = () => command({ command: 'grip' });
+document.getElementById('btnAbort').onclick = () => command({ command: 'abort' });
+document.getElementById('btnOpen').onclick = () => command({ command: 'open', session_id: sessionId() });
+document.getElementById('btnScan').onclick = () => command({ command: 'scan', session_id: sessionId() });
+document.getElementById('btnSolve').onclick = () => {
+  const rev = lastStatus?.scan?.revision;
+  if (rev == null) return log('no scan revision yet', 'er');
+  command({ command: 'solve', session_id: sessionId(), scan_revision: rev });
+};
+document.getElementById('btnExecute').onclick = () => {
+  const rev = lastStatus?.scan?.revision, sol = lastStatus?.solution;
+  if (rev == null || sol?.id == null) return log('need scan revision and solution id', 'er');
+  setExpectedMoves(sol.moves.slice(0, sol.move_count)
+    .map(m => ({ face: FACE_LETTER[m.face], turns: [1, -1, 2][m.turn] })));
+  command({ command: 'execute', session_id: sessionId(), scan_revision: rev, solution_id: sol.id });
+};
+document.getElementById('btnAuto').onclick = () => {
+  setExpectedMoves([]); // filled from the solution once solving finishes
+  command({ command: 'auto', session_id: sessionId() });
+};
+document.getElementById('btnMoves').onclick = () => {
+  const sequence = document.getElementById('movesInput').value.trim();
+  if (!sequence) return;
+  const moves = parseMoves(sequence);
+  if (!moves) return log(`invalid move sequence: ${sequence}`, 'er');
+  setExpectedMoves(moves);
+  command({ command: 'moves', session_id: sessionId(), sequence });
+};
+
+function parseMoves(text) {
+  const moves = [];
+  for (const token of text.split(/[\s,]+/).filter(Boolean)) {
+    const m = /^([URFDLB])(2|'|'2|2')?$/.exec(token);
+    if (!m) return null;
+    moves.push({ face: m[1], turns: m[2]?.includes('2') ? 2 : m[2] ? 1 : -1 });
+  }
+  return moves;
+}
+
+function refreshButtons(controllerState) {
+  const busy = controllerState === 2 || controllerState === 0;
+  for (const id of ['btnOpen', 'btnScan', 'btnSolve', 'btnExecute', 'btnAuto', 'btnMoves', 'btnGrip'])
+    document.getElementById(id).disabled = busy;
+  document.getElementById('btnAbort').disabled = !busy;
+}
+
+/* ---------- status rendering ---------- */
+let lastStatus = null;
+const tbody = document.querySelector('#axisTable tbody');
+for (let i = 0; i < 4; i++) {
+  const tr = document.createElement('tr');
+  tr.innerHTML = `<td>${AXIS_NAMES[i]}</td><td class="cur">—</td><td class="tgt">—</td>
+    <td><div class="bar"><i></i></div></td>`;
+  tbody.appendChild(tr);
+}
+
+const MOTION = ['?', 'stable', 'moving'];
+function renderStatus(status, railsProgress, gripperAngle) {
+  lastStatus = status;
+  const ctrl = CTRL_NAMES[status.controller] ?? status.controller;
+  setBadge('ctrlBadge', ctrl, status.controller === 1 ? 'ok' : status.controller === 4 ? 'err' : 'warn');
+  const pose = POSE_NAMES[status.stand.pose.kind] ?? status.stand.pose.kind;
+  const camFace = status.stand.pose.camera_face;
+  setBadge('poseBadge', `${pose}${camFace != null ? ' → ' + FACE_LETTER[camFace] : ''}`);
+
+  const rows = tbody.rows;
+  for (let i = 0; i < 4; i++) {
+    const rail = status.stand.rails[i], grip = status.stand.grippers[i];
+    const cells = rows[i].cells;
+    cells[1].textContent = rail.current === RAIL_GRIP ? 'grip' : rail.current === RAIL_OPEN ? 'open' : '?';
+    cells[2].textContent = rail.target === RAIL_GRIP ? 'grip' : rail.target === RAIL_OPEN ? 'open' : '?';
+    if (MOTION[rail.motion] === 'moving') cells[2].textContent += ' ⟳';
+    rows[i].querySelector('.bar > i').style.width = `${Math.round((railsProgress?.[i] ?? 0) * 100)}%`;
+    void grip; void gripperAngle;
+  }
+  document.getElementById('outputsVal').textContent = status.stand.outputs_enabled ? 'enabled' : 'off';
+
+  const scan = status.scan;
+  document.getElementById('scanState').textContent =
+    ['none', 'in-progress', 'valid', 'invalid'][scan.state] ?? scan.state;
+  document.getElementById('scanRev').textContent = scan.revision ?? '—';
+  const done = [];
+  for (let f = 0; f < 6; f++) if (scan.scanned_faces & (1 << f)) done.push(FACE_LETTER[f]);
+  document.getElementById('scanFaces').textContent = done.join(' ') || '—';
+
+  const sol = status.solution;
+  document.getElementById('solState').textContent =
+    ['none', 'solving', 'ready', 'executing', 'completed'][sol.state] ?? sol.state;
+  document.getElementById('solProg').textContent =
+    sol.id != null ? `#${sol.id}: ${sol.completed_moves}/${sol.move_count}` : '—';
+  renderMoves(sol);
+
+  // camera snapping during scans
+  if (status.stand.pose.kind === 3 && camFace != null && !dragging) snapCameraTo(FACE_LETTER[camFace]);
+
+  refreshButtons(status.controller);
+}
+
+let moveChipsFor = null;
+function renderMoves(sol) {
+  const box = document.getElementById('moves');
+  if (!sol.move_count) { box.innerHTML = ''; moveChipsFor = null; return; }
+  const key = `${sol.id}:${sol.move_count}`;
+  if (moveChipsFor !== key) {
+    moveChipsFor = key;
+    box.innerHTML = '';
+    for (let i = 0; i < sol.move_count; i++) {
+      const mv = sol.moves[i];
+      const chip = document.createElement('span');
+      chip.className = 'mv';
+      chip.textContent = FACE_LETTER[mv.face] + ['', "'", '2'][mv.turn];
+      box.appendChild(chip);
+    }
+  }
+  [...box.children].forEach((chip, i) => {
+    chip.classList.toggle('done', i < sol.completed_moves);
+    chip.classList.toggle('next', i === sol.completed_moves);
+  });
+}
+
+function setBadge(id, text, cls) {
+  const el = document.getElementById(id);
+  el.textContent = text;
+  el.className = 'badge ' + (cls ?? '');
+}
+
+/* ---------- log ---------- */
+const logBox = document.getElementById('log');
+function log(text, cls = 'ev') {
+  const line = document.createElement('div');
+  const t = new Date().toLocaleTimeString();
+  line.innerHTML = `<span class="t">${t}</span> <span class="${cls}">${escapeHtml(text)}</span>`;
+  logBox.appendChild(line);
+  while (logBox.children.length > 300) logBox.firstChild.remove();
+  logBox.scrollTop = logBox.scrollHeight;
+}
+function escapeHtml(s) {
+  return s.replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
+}
+
+/* ---------- SSE ---------- */
+const collisionActive = {};
+function handleServerMessage(msg) {
+  switch (msg.type) {
+    case 'status':
+      feedOracle(msg.status);
+      renderStatus(msg.status, msg.rails_progress, msg.gripper_angle);
+      break;
+    case 'event': handleEvent(msg.opcode, msg.payload); break;
+    case 'collision': handleCollision(msg); break;
+  }
+}
+
+function handleEvent(opcode, p) {
+  // wire event opcodes (rubik-link-protocol EventOpcode)
+  const EV = {
+    RobotStateChanged: 0x2000, StandStateChanged: 0x2001, FaceScanned: 0x2002,
+    OperationCompleted: 0x2006, Aborted: 0x2007, CubeSessionChanged: 0x2008,
+    OperationFailed: 0x2009, Fault: 0x20ff,
+  };
+  if (opcode === EV.FaceScanned) {
+    log(`face scanned: ${FACE_LETTER[p.face]} (${COLOR_NAME[p.recognized.colors[4]]} center), ` +
+      `${p.scanned_faces}/6`);
+    paintFace(p.face, p.recognized.colors);
+    const flash = document.getElementById('scanFlash');
+    flash.style.opacity = 1;
+    setTimeout(() => flash.style.opacity = 0, 160);
+    if (!dragging) snapCameraTo(FACE_LETTER[p.face]);
+  } else if (opcode === EV.OperationCompleted) {
+    log(`operation completed: ${OP_KIND[p.kind] ?? p.kind}`);
+  } else if (opcode === EV.OperationFailed) {
+    log(`operation failed: ${JSON.stringify(p)}`, 'er');
+  } else if (opcode === EV.Aborted) {
+    log(`aborted: ${JSON.stringify(p)}`, 'er');
+  } else if (opcode === EV.Fault) {
+    log(`FAULT: ${JSON.stringify(p)}`, 'er');
+  } else if (opcode === EV.CubeSessionChanged) {
+    if (p.session) log(`cube session #${p.session.id} opened`);
+    else log('cube session closed');
+  }
+}
+
+function handleCollision(msg) {
+  collisionActive[msg.rule] = msg.active;
+  const any = Object.values(collisionActive).some(Boolean);
+  document.getElementById('collisionVignette').classList.toggle('active', any);
+  log(`${msg.active ? '⚠ COLLISION' : 'collision cleared'} [${msg.rule}] ${msg.description ?? ''}`,
+    msg.active ? 'col' : 'ev');
+}
+
+function connectEvents() {
+  const es = new EventSource('/events');
+  es.onopen = () => setBadge('connBadge', 'connected', 'ok');
+  es.onerror = () => {
+    setBadge('connBadge', 'reconnecting…', 'err');
+    es.close();
+    setTimeout(connectEvents, 1500);
+  };
+  es.onmessage = e => {
+    try { handleServerMessage(JSON.parse(e.data)); } catch { /* ignore */ }
+  };
+}
+
+/* ---------- main loop ---------- */
+let lastT = performance.now();
+function tick(now) {
+  const dt = Math.min(0.1, (now - lastT) / 1000);
+  lastT = now;
+
+  startNextAnim();
+  if (activeAnim) {
+    activeAnim.t += dt;
+    const k = Math.min(1, activeAnim.t / activeAnim.duration);
+    const eased = k < 0.5 ? 2 * k * k : 1 - (-2 * k + 2) ** 2 / 2;
+    if (activeAnim.wholeCube) {
+      const target = activeAnim.toRotated ? Math.PI / 2 : 0;
+      const from = activeAnim.toRotated ? 0 : Math.PI / 2;
+      cubeGroup.rotation.y = from + (target - from) * eased;
+      if (k >= 1) { cubeGroup.rotation.y = target; activeAnim = null; }
+    } else {
+      activeAnim.pivot.setRotationFromAxisAngle(activeAnim.worldNormal, activeAnim.total * eased);
+      if (k >= 1) finishAnim();
+    }
+  }
+
+  if (!orbit.snapped && !dragging) applyCamera();
+  renderer.render(scene, camera);
+  requestAnimationFrame(tick);
+}
+
+resize();
+resetCube();
+applyCamera();
+connectEvents();
+requestAnimationFrame(tick);
+log('simulator UI ready');
+</script>
+</body>
+</html>

@@ -2880,10 +2880,11 @@ cargo run --features pca9685 --bin rubik-move-plan -- "F B R2 U' L"
 ```
 
 Он печатает обе action traces и считает продолжительность по текущей
-`StandCalibration`. Для примера выше baseline содержит 47 mechanical actions
-и оценивается в 52.6 s, optimized — 32 actions и 35.6 s: экономия 15 actions,
-24 servo targets и 17 s. Флаг `--open-after` добавляет normal open к обоим
-планам; `--config` позволяет считать время с фактической calibration стенда.
+`StandCalibration`. Для примера выше baseline содержит 50 mechanical actions
+и оценивается в 55 s, optimized — 30 actions и 32.2 s: экономия 20 actions,
+31 servo target и 22.8 s. Флаг `--open-after` показывает Release-вариант
+optimized-плана; `--config` позволяет считать время с фактической calibration
+стенда.
 
 `MoveCompleted` теперь отмечает завершение логического поворота, а не
 обязательную canonical boundary. Пока следующая совместимая грань использует
@@ -2899,39 +2900,33 @@ progress и диагностическая последовательность 
 
 #### Dry-run на официальных Cube20 scrambles
 
-Для первой проверки stateful planner были взяты 10 случайных скремблов из
-раздела Cube20 с известными distance-20 позициями:
+Для воспроизводимой проверки после всех оптимизаций взяты 10 последовательностей
+из официального файла Cube20 `random10.txt`:
 
-<https://cube20.org/distance20s/>
+<https://cube20.org/distance20s/random10.txt>
 
 Cube20 использует компактную запись без пробелов: `U1`, `U2`, `U3`. Перед
 передачей в `rubik-move-plan` она была преобразована в нашу Singmaster-нотацию:
 `U1 → U`, `U2 → U2`, `U3 → U'`, с пробелами между ходами.
 
-Суммарный результат по 10 скремблам:
+Суммарный результат по 10 скремблам на default `StandCalibration`:
 
-- baseline: 1853 mechanical actions, 2669 servo targets, около 34 мин 33 с;
-- optimized: 1727 mechanical actions, 2525 servo targets, около 32 мин 11 с;
-- экономия: 126 actions, 144 servo targets и около 2 мин 23 с (примерно 6.9%).
+- baseline: 1910 mechanical actions, 2748 servo targets, 35 мин 27.6 с;
+- optimized: 1428 mechanical actions, 2029 servo targets, 26 мин 13.6 с;
+- экономия: 482 actions, 719 servo targets и 9 мин 14 с;
+  это примерно 25.2% actions, 26.2% servo targets и 26.0% времени.
 
 Наибольшая экономия была на отдельных последовательностях:
 
-- case 7: `209 → 173` actions;
-- case 10: `200 → 167`;
-- case 2: `164 → 149`;
-- case 3: `206 → 188`.
+- case 7: `212 → 129` actions;
+- case 10: `203 → 125`;
+- case 5: `197 → 135`;
+- case 3: `213 → 160`.
 
 Экономия зависит от структуры последовательности: planner выигрывает там, где
 встречаются совместимые блоки `L/R`, `U/D` или последовательные `F/B`. Это был
 только hardware-free dry-run; I²C и сервоприводы не использовались.
 
-Указанная ссылка WCA ведёт на экспорт базы результатов, а не на небольшой файл
-со скремблами. В базе есть таблица `scrambles`, но актуальный TSV-экспорт имеет
-размер около 354 MB:
-
-<https://www.worldcubeassociation.org/export/results>
-
-Поэтому для текущей проверки использован компактный набор Cube20. Следующая
-проверка — прогонять через тот же dry-run реальные solver solutions и после
-замены сломанной шестерни физически проверить последовательности с наибольшей
-экономией.
+Это hardware-free dry-run: I²C и сервоприводы не использовались. Следующая
+проверка — прогнать реальные solver solutions и после замены сломанной шестерни
+физически проверить последовательности с наибольшей экономией.

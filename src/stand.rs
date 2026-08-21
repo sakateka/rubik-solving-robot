@@ -103,7 +103,7 @@ impl GripConfiguration {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StandCalibration {
     pub rails: RailCalibration,
@@ -111,14 +111,14 @@ pub struct StandCalibration {
     pub timing: TimingCalibration,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RailCalibration {
     pub far_open_us: u16,
     pub near_grip_us: u16,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GrippersCalibration {
     pub right: GripperCalibration,
@@ -127,7 +127,7 @@ pub struct GrippersCalibration {
     pub left: GripperCalibration,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GripperCalibration {
     pub frame_parallel_us: u16,
@@ -135,7 +135,7 @@ pub struct GripperCalibration {
     pub frame_parallel_reversed_us: u16,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TimingCalibration {
     /// Time for every rail to reach the far/open position before grippers move.

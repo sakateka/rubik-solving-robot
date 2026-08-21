@@ -1,148 +1,100 @@
-//! UART robot daemon with an in-memory PWM backend.
+//! Simulated robot daemon: the full protocol stack of the hardware daemon,
+//! but the stand is a 3D web UI instead of PCA9685 servos and the camera is
+//! replaced by a scanner that always recognizes a solved cube. An optional
+//! UART can still be attached for protocol-level testing.
 
-use anyhow::{bail, Result};
-use clap::Parser;
+use anyhow::Result;
 use rubik_scan::{
     pca9685::PwmOutput,
-    robot_daemon::{run_uart_daemon, UartDaemonOptions},
+    robot_daemon::{run_uart_daemon, DaemonHub, UartDaemonOptions},
     robot_service::{FaceScanner, RobotService},
+    sim_server::{run_sim_server, SimEngine, SimUpdate},
     stand::StandCalibration,
 };
-use std::path::PathBuf;
+use rubik_link_protocol as link;
+use std::path::Path;
+use std::sync::mpsc;
 
-const PWM_CHANNEL_COUNT: usize = 16;
+/// No-op PWM backend; the web UI renders stand motion from status snapshots.
+#[derive(Default)]
+struct SimPwmOutput;
 
-#[derive(Parser)]
-#[command(about = "Run the robot control service without I2C or servo output")]
-struct Cli {
-    /// Duo UART connected to ESP32-C6
-    #[arg(long, default_value = "/dev/ttyS1")]
-    uart_device: PathBuf,
-
-    /// Do not invoke stty; use an already-configured raw UART
-    #[arg(long)]
-    skip_uart_config: bool,
-
-    /// Optional TOML file overriding built-in stand calibration and timings
-    #[arg(long)]
-    config: Option<PathBuf>,
-
-    /// Print simulated PWM writes to stderr
-    #[arg(long)]
-    trace_pwm: bool,
-}
-
-fn main() -> Result<()> {
-    let cli = Cli::parse();
-    let calibration = match &cli.config {
-        Some(path) => StandCalibration::load(path)?,
-        None => StandCalibration::default(),
-    };
-    let output = SimulatedPwmOutput::new(cli.trace_pwm);
-
-    eprintln!("SIMULATION: no I2C device will be opened and no PWM will be emitted");
-    run_uart_daemon(
-        UartDaemonOptions {
-            process_name: "rubik-robotd-sim",
-            uart_device: &cli.uart_device,
-            skip_uart_config: cli.skip_uart_config,
-        },
-        RobotService::with_scanner(output, calibration, SimulatedScanner),
-    )
-}
-
-struct SimulatedScanner;
-
-impl FaceScanner for SimulatedScanner {
-    fn capture(
-        &mut self,
-        face: rubik_link_protocol::CubeFace,
-    ) -> Result<rubik_link_protocol::RecognizedFace> {
-        use rubik_link_protocol::{CubeFace, StickerColor};
-        let color = match face {
-            CubeFace::Up => StickerColor::White,
-            CubeFace::Right => StickerColor::Red,
-            CubeFace::Front => StickerColor::Green,
-            CubeFace::Down => StickerColor::Yellow,
-            CubeFace::Left => StickerColor::Orange,
-            CubeFace::Back => StickerColor::Blue,
-        };
-        Ok(rubik_link_protocol::RecognizedFace {
-            colors: [color; rubik_link_protocol::STICKERS_PER_FACE],
-            confidence: [255; rubik_link_protocol::STICKERS_PER_FACE],
-        })
-    }
-}
-
-struct SimulatedPwmOutput {
-    channels: [Option<u16>; PWM_CHANNEL_COUNT],
-    trace: bool,
-}
-
-impl SimulatedPwmOutput {
-    const fn new(trace: bool) -> Self {
-        Self {
-            channels: [None; PWM_CHANNEL_COUNT],
-            trace,
-        }
-    }
-
-    fn validate_channel(channel: u8) -> Result<usize> {
-        let index = usize::from(channel);
-        if index >= PWM_CHANNEL_COUNT {
-            bail!("simulated PWM channel must be 0..15, got {channel}");
-        }
-        Ok(index)
-    }
-}
-
-impl PwmOutput for SimulatedPwmOutput {
-    fn set_channels(&mut self, channels: &[(u8, u16)]) -> Result<()> {
-        for &(channel, pulse_us) in channels {
-            self.channels[Self::validate_channel(channel)?] = Some(pulse_us);
-        }
-        if self.trace {
-            eprintln!("[sim:pwm] set {channels:?}");
-        }
+impl PwmOutput for SimPwmOutput {
+    fn set_channels(&mut self, _channels: &[(u8, u16)]) -> Result<()> {
         Ok(())
     }
 
-    fn disable_channels(&mut self, channels: &[u8]) -> Result<()> {
-        for &channel in channels {
-            self.channels[Self::validate_channel(channel)?] = None;
-        }
-        if self.trace {
-            eprintln!("[sim:pwm] disable {channels:?}");
-        }
+    fn disable_channels(&mut self, _channels: &[u8]) -> Result<()> {
         Ok(())
     }
 
     fn all_off(&mut self) -> Result<()> {
-        self.channels.fill(None);
-        if self.trace {
-            eprintln!("[sim:pwm] all off");
-        }
         Ok(())
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// Always recognizes a solved cube face with perfect confidence.
+struct SolvedCubeScanner;
 
-    #[test]
-    fn simulated_output_tracks_set_disable_and_all_off() {
-        let mut output = SimulatedPwmOutput::new(false);
+const SOLVED_FACES: [[link::StickerColor; 9]; 6] = [
+    [link::StickerColor::White; 9],    // Up
+    [link::StickerColor::Red; 9],      // Right
+    [link::StickerColor::Green; 9],    // Front
+    [link::StickerColor::Yellow; 9],   // Down
+    [link::StickerColor::Orange; 9],   // Left
+    [link::StickerColor::Blue; 9],     // Back
+];
 
-        output.set_channels(&[(0, 1_500), (7, 2_500)]).unwrap();
-        assert_eq!(output.channels[0], Some(1_500));
-        assert_eq!(output.channels[7], Some(2_500));
-
-        output.disable_channels(&[0]).unwrap();
-        assert_eq!(output.channels[0], None);
-        assert_eq!(output.channels[7], Some(2_500));
-
-        output.all_off().unwrap();
-        assert!(output.channels.iter().all(Option::is_none));
+impl FaceScanner for SolvedCubeScanner {
+    fn capture(&mut self, face: link::CubeFace) -> Result<link::RecognizedFace> {
+        Ok(link::RecognizedFace {
+            colors: SOLVED_FACES[face as usize],
+            confidence: [255; 9],
+        })
     }
+}
+
+fn main() -> Result<()> {
+    let mut args = std::env::args().skip(1);
+    let mut addr = "127.0.0.1:8080".to_owned();
+    let mut uart_device = None;
+    let mut skip_uart_config = false;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--addr" => {
+                addr = args.next().expect("--addr requires a value");
+            }
+            "--uart" => {
+                uart_device = Some(args.next().expect("--uart requires a device path"));
+            }
+            "--skip-uart-config" => skip_uart_config = true,
+            other => anyhow::bail!("unknown argument {other:?}"),
+        }
+    }
+
+    let calibration = StandCalibration::default();
+    let service = RobotService::with_scanner(SimPwmOutput, calibration.clone(), SolvedCubeScanner);
+
+    let (update_tx, update_rx) = mpsc::channel::<SimUpdate>();
+    let (hub, inbound) = DaemonHub::new(Box::new(SimEngine::new(update_tx)));
+
+    let server_addr = addr.clone();
+    let server_thread = std::thread::spawn(move || {
+        if let Err(error) = run_sim_server(&server_addr, update_rx, inbound, &calibration) {
+            eprintln!("simulation server failed: {error:#}");
+            std::process::exit(1);
+        }
+    });
+
+    let result = run_uart_daemon(
+        UartDaemonOptions {
+            process_name: "rubik-robotd-sim",
+            uart_device: uart_device.as_deref().map(Path::new),
+            skip_uart_config,
+            hub: Some(hub),
+        },
+        service,
+    );
+    let _ = server_thread.join();
+    result
 }

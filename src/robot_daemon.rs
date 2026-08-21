@@ -2,10 +2,11 @@
 
 use crate::{
     pca9685::PwmOutput,
-    robot_link::{UartFrameEncoder, UartStreamDecoder},
+    robot_link::{ReceivedPacket, UartFrameEncoder, UartStreamDecoder},
     robot_service::{FaceScanner, RobotService, ServiceMessage},
 };
 use anyhow::{bail, Context, Result};
+use rubik_link_protocol as link;
 use std::{
     fs::{File, OpenOptions},
     io::{Read, Write},
@@ -18,10 +19,52 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Receives telemetry from the daemon loop alongside the primary transport.
+///
+/// Implementations run on the daemon thread and must never block: every
+/// callback is invoked from the same loop that services UART traffic.
+pub trait DaemonObserver: Send {
+    fn observe_status(&mut self, _status: &link::StatusSnapshot) {}
+    fn observe_request(&mut self, _packet: &ReceivedPacket) {}
+    fn observe_messages(&mut self, _messages: &[ServiceMessage]) {}
+}
+
+/// Bridge between the daemon loop and auxiliary transports such as the
+/// simulation HTTP server.
+///
+/// Frames pushed through the returned sender are decoded by the daemon loop
+/// exactly like UART bytes, so HTTP-injected commands produce protocol
+/// responses (and events) that are also mirrored onto the real UART when one
+/// is attached.
+pub struct DaemonHub {
+    observer: Box<dyn DaemonObserver>,
+    inbound: mpsc::Receiver<Vec<u8>>,
+}
+
+impl DaemonHub {
+    /// Creates a hub plus the sender auxiliary clients use to inject frames.
+    pub fn new(observer: Box<dyn DaemonObserver>) -> (Self, mpsc::Sender<Vec<u8>>) {
+        let (sender, receiver) = mpsc::channel();
+        (
+            Self {
+                observer,
+                inbound: receiver,
+            },
+            sender,
+        )
+    }
+
+    fn try_recv_inbound(&mut self) -> Option<Vec<u8>> {
+        self.inbound.try_recv().ok()
+    }
+}
+
 pub struct UartDaemonOptions<'a> {
     pub process_name: &'a str,
-    pub uart_device: &'a Path,
+    /// `None` runs without a UART transport (for example an HTTP-only sim).
+    pub uart_device: Option<&'a Path>,
     pub skip_uart_config: bool,
+    pub hub: Option<DaemonHub>,
 }
 
 pub fn run_uart_daemon<D, S>(
@@ -32,20 +75,30 @@ where
     D: PwmOutput,
     S: FaceScanner,
 {
-    if !options.skip_uart_config {
-        configure_uart(options.uart_device)?;
-    }
+    let UartDaemonOptions {
+        process_name,
+        uart_device,
+        skip_uart_config,
+        mut hub,
+    } = options;
 
-    let uart = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(options.uart_device)
-        .with_context(|| format!("failed to open UART {}", options.uart_device.display()))?;
-    let reader = uart
-        .try_clone()
-        .context("failed to clone UART for reader thread")?;
-    let mut writer = uart;
-    let receiver = spawn_uart_reader(reader);
+    let (writer, receiver) = match uart_device {
+        Some(path) => {
+            if !skip_uart_config {
+                configure_uart(path)?;
+            }
+            let uart = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)
+                .with_context(|| format!("failed to open UART {}", path.display()))?;
+            let reader = uart
+                .try_clone()
+                .context("failed to clone UART for reader thread")?;
+            (Some(uart), Some(spawn_uart_reader(reader)))
+        }
+        None => (None, None),
+    };
     let mut decoder = UartStreamDecoder::default();
     let mut encoder = UartFrameEncoder::default();
 
@@ -54,25 +107,35 @@ where
     ctrlc::set_handler(move || signal_running.store(false, Ordering::SeqCst))
         .context("failed to install Ctrl-C shutdown handler")?;
 
-    eprintln!(
-        "{} ready uart={} pose=unknown; send RecoverToOpen first",
-        options.process_name,
-        options.uart_device.display()
-    );
+    match uart_device {
+        Some(path) => eprintln!(
+            "{} ready uart={} pose=unknown; send RecoverToOpen first",
+            process_name,
+            path.display()
+        ),
+        None => eprintln!(
+            "{process_name} ready uart=none pose=unknown; send RecoverToOpen first"
+        ),
+    }
+
+    if let Some(hub) = hub.as_mut() {
+        hub.observer.observe_status(service.status());
+    }
 
     let run_result = run_event_loop(
         &running,
-        &receiver,
+        receiver.as_ref(),
         &mut decoder,
         &mut encoder,
-        &mut writer,
+        writer.as_ref(),
         &mut service,
+        hub.as_mut(),
     );
     let shutdown_result = service.shutdown();
 
     match (run_result, shutdown_result) {
         (Ok(()), Ok(())) => {
-            eprintln!("{} stopped; outputs=all_off", options.process_name);
+            eprintln!("{} stopped; outputs=all_off", process_name);
             Ok(())
         }
         (Err(error), Ok(())) => Err(error),
@@ -85,37 +148,68 @@ where
 
 fn run_event_loop<D, S>(
     running: &AtomicBool,
-    receiver: &mpsc::Receiver<std::io::Result<Vec<u8>>>,
+    receiver: Option<&mpsc::Receiver<std::io::Result<Vec<u8>>>>,
     decoder: &mut UartStreamDecoder,
     encoder: &mut UartFrameEncoder,
-    writer: &mut File,
+    writer: Option<&File>,
     service: &mut RobotService<D, S>,
+    mut hub: Option<&mut DaemonHub>,
 ) -> Result<()>
 where
     D: PwmOutput,
     S: FaceScanner,
 {
     while running.load(Ordering::SeqCst) {
-        match receiver.recv_timeout(Duration::from_millis(10)) {
-            Ok(Ok(bytes)) => {
+        if let Some(hub) = hub.as_mut() {
+            while let Some(bytes) = hub.try_recv_inbound() {
                 for byte in bytes {
                     match decoder.push(byte) {
                         Some(Ok(packet)) => {
+                            hub.observer.observe_request(&packet);
                             let messages = service.handle_packet(&packet, Instant::now());
                             write_messages(writer, encoder, &messages)?;
+                            hub.observer.observe_messages(&messages);
                         }
-                        Some(Err(error)) => eprintln!("discarded UART frame: {error:?}"),
+                        Some(Err(error)) => eprintln!("discarded inbound frame: {error:?}"),
                         None => {}
                     }
                 }
             }
-            Ok(Err(error)) => return Err(error).context("UART reader failed"),
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => bail!("UART reader stopped"),
+        }
+
+        match receiver {
+            Some(receiver) => match receiver.recv_timeout(Duration::from_millis(10)) {
+                Ok(Ok(bytes)) => {
+                    for byte in bytes {
+                        match decoder.push(byte) {
+                            Some(Ok(packet)) => {
+                                if let Some(hub) = hub.as_mut() {
+                                    hub.observer.observe_request(&packet);
+                                }
+                                let messages = service.handle_packet(&packet, Instant::now());
+                                write_messages(writer, encoder, &messages)?;
+                                if let Some(hub) = hub.as_mut() {
+                                    hub.observer.observe_messages(&messages);
+                                }
+                            }
+                            Some(Err(error)) => eprintln!("discarded UART frame: {error:?}"),
+                            None => {}
+                        }
+                    }
+                }
+                Ok(Err(error)) => return Err(error).context("UART reader failed"),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => bail!("UART reader stopped"),
+            },
+            None => std::thread::sleep(Duration::from_millis(10)),
         }
 
         let messages = service.tick(Instant::now());
         write_messages(writer, encoder, &messages)?;
+        if let Some(hub) = hub.as_mut() {
+            hub.observer.observe_status(service.status());
+            hub.observer.observe_messages(&messages);
+        }
     }
     Ok(())
 }
@@ -160,10 +254,14 @@ fn spawn_uart_reader(mut reader: File) -> mpsc::Receiver<std::io::Result<Vec<u8>
 }
 
 fn write_messages(
-    writer: &mut File,
+    writer: Option<&File>,
     encoder: &mut UartFrameEncoder,
     messages: &[ServiceMessage],
 ) -> Result<()> {
+    let Some(writer) = writer else {
+        return Ok(());
+    };
+    let mut writer = writer;
     for message in messages {
         let frame = message.encode_uart(encoder)?;
         writer
