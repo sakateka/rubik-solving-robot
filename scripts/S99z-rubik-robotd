@@ -3,6 +3,8 @@
 DAEMON="/mnt/storage/rubik-robotd"
 CONFIG="/mnt/storage/stand.toml"
 PIDFILE="/var/run/rubik-robotd.pid"
+STOP_TIMEOUT=30
+RESTART_DELAY=2
 
 # Vendor camera and TPU shared libraries from the stock Milk-V Duo image.
 export LD_LIBRARY_PATH="/mnt/system/lib:/mnt/system/usr/lib:/mnt/system/usr/lib/3rd"
@@ -30,29 +32,83 @@ start() {
 
 stop() {
 	printf 'Stopping rubik-robotd: '
+	if [ ! -r "$PIDFILE" ]; then
+		echo "OK (not running)"
+		return 0
+	fi
+	pid=$(cat "$PIDFILE")
+	case "$pid" in
+		''|*[!0-9]*)
+			echo "FAIL (invalid PID file)"
+			return 1
+			;;
+	esac
+	if ! kill -0 "$pid" 2>/dev/null; then
+		rm -f "$PIDFILE"
+		echo "OK (stale PID file removed)"
+		return 0
+	fi
 	start-stop-daemon -K -q -p "$PIDFILE" -x "$DAEMON"
 	status=$?
-	if [ "$status" -eq 0 ]; then
-		rm -f "$PIDFILE"
-		echo "OK"
-	else
+	if [ "$status" -ne 0 ]; then
 		echo "FAIL"
+		return "$status"
 	fi
-	return "$status"
+
+	waited=0
+	while kill -0 "$pid" 2>/dev/null; do
+		if [ "$waited" -ge "$STOP_TIMEOUT" ]; then
+			echo "FAIL (still running after ${STOP_TIMEOUT}s)"
+			return 1
+		fi
+		sleep 1
+		waited=$((waited + 1))
+	done
+	rm -f "$PIDFILE"
+	echo "OK"
 }
 
 restart() {
-	stop
-	sleep 1
+	stop || return $?
+	sleep "$RESTART_DELAY"
 	start
 }
 
+status() {
+	if [ ! -r "$PIDFILE" ]; then
+		echo "rubik-robotd is stopped"
+		return 3
+	fi
+	pid=$(cat "$PIDFILE")
+	case "$pid" in
+		''|*[!0-9]*)
+			echo "rubik-robotd status is unknown (invalid PID file)"
+			return 4
+			;;
+	esac
+	if ! kill -0 "$pid" 2>/dev/null; then
+		echo "rubik-robotd is stopped (stale PID file, pid=$pid)"
+		return 1
+	fi
+	executable=$(readlink "/proc/$pid/exe" 2>/dev/null || true)
+	case "$executable" in
+		"$DAEMON"|"$DAEMON (deleted)")
+			echo "rubik-robotd is running (pid=$pid)"
+			return 0
+			;;
+		*)
+			echo "rubik-robotd status is unknown (pid=$pid belongs to $executable)"
+			return 4
+			;;
+	esac
+}
+
 case "${1:-}" in
-	start|stop|restart)
+	start|stop|restart|status)
 		"$1"
 		;;
 	*)
-		echo "Usage: $0 {start|stop|restart}"
+		echo "Usage: $0 {start|stop|restart|status}"
 		exit 1
 		;;
 esac

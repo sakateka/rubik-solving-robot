@@ -3217,6 +3217,24 @@ Runtime выбирает pulse по физической оси во всех п
 vendor shared libraries, запускает `/mnt/storage/rubik-robotd` через
 `start-stop-daemon` с `--confirm-stand-motion` и конфигурацией
 `/mnt/storage/stand.toml`, а также поддерживает `start`, `stop` и `restart`.
+При `stop` script отправляет штатный `SIGTERM` и до 30 секунд ждёт фактического
+завершения PID из pidfile. Pidfile удаляется только после выхода процесса;
+`restart` не запускает новый daemon, если старый не завершился или остановка
+вернула ошибку. Это исключает гонку за camera, UART и PCA9685. Принудительный
+`SIGKILL` при timeout намеренно не используется, потому что он обошёл бы
+штатный `RobotService::shutdown()` с `all_off`.
+Dependency `ctrlc` собирается с feature `termination`: без него установленный
+handler принимал только `SIGINT`, а `SIGTERM` от `start-stop-daemon` немедленно
+убивал процесс без Rust destructors. Теперь `SIGTERM` сначала останавливает
+event loop, затем выполняются `RobotService::shutdown()`, `Camera::drop()` и
+`CviTpuDetector::drop()`, освобождая PCA9685, VI/ISP/VPSS и TPU runtime.
+После подтверждённого выхода `restart` дополнительно ждёт 2 секунды перед
+новым `start`, чтобы camera/TPU drivers успели освободить hardware resources.
+Команда `status` сверяет PID из pidfile с `/proc/<pid>/exe`, сообщает PID
+работающего daemon и отличает его от отсутствующего процесса, stale pidfile и
+PID, уже принадлежащего другому executable. Exit codes следуют SysV/LSB
+соглашению: `0` для running, `3` для stopped без pidfile, `1` для dead process
+со stale pidfile и `4` для неизвестного состояния.
 
 Production `VisionScanner` после успешной записи PNG, YOLO labels и распознанной
 матрицы каждой стороны вызывает системный `sync`. Только после успешного
