@@ -31,7 +31,7 @@ use std::{
         atomic::{AtomicBool, AtomicU32, Ordering},
         mpsc, Arc, Mutex,
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{broadcast, oneshot};
 use tokio_stream::wrappers::BroadcastStream;
@@ -358,8 +358,7 @@ impl VisualReplay {
                             }
                             let mut rendered = expected;
                             if expected.turns.abs() == 2 {
-                                let Some((current, target)) =
-                                    gripper.current.zip(gripper.target)
+                                let Some((current, target)) = gripper.current.zip(gripper.target)
                                 else {
                                     continue;
                                 };
@@ -819,8 +818,7 @@ impl SimState {
         } else {
             self.rail_open_ms
         };
-        let fraction = (start.elapsed().as_secs_f32() * 1000.0
-            * self.animation_speed as f32
+        let fraction = (start.elapsed().as_secs_f32() * 1000.0 * self.animation_speed as f32
             / duration)
             .clamp(0.0, 1.0);
         if to_grip {
@@ -846,10 +844,10 @@ impl SimState {
                 self.gripper_from[index],
             ) {
                 let duration = self.gripper_duration_ms(index, target);
-                let fraction = (start.elapsed().as_secs_f32() * 1000.0
-                    * self.animation_speed as f32
-                    / duration)
-                    .clamp(0.0, 1.0);
+                let fraction =
+                    (start.elapsed().as_secs_f32() * 1000.0 * self.animation_speed as f32
+                        / duration)
+                        .clamp(0.0, 1.0);
                 angles[index] = Some(from + (orientation_angle(target) - from) * fraction);
             }
         }
@@ -872,9 +870,7 @@ impl SimState {
             .target
             .map(|target| self.gripper_duration_ms(index, target))
             .unwrap_or(self.gripper_ms);
-        (start.elapsed().as_secs_f32() * 1000.0
-            * self.animation_speed as f32
-            / duration)
+        (start.elapsed().as_secs_f32() * 1000.0 * self.animation_speed as f32 / duration)
             .clamp(0.0, 1.0)
     }
 
@@ -1205,11 +1201,13 @@ struct SessionState {
     last_access: Mutex<Instant>,
     stop: Arc<AtomicBool>,
     animation_speed: Arc<AtomicU32>,
+    server_instance: String,
 }
 
 struct AppState {
     calibration: StandCalibration,
     sessions: Mutex<HashMap<String, Arc<SessionState>>>,
+    server_instance: String,
 }
 
 impl SessionState {
@@ -1244,14 +1242,14 @@ impl AppState {
         let session = Arc::clone(
             sessions
                 .entry(id.to_owned())
-                .or_insert_with(|| spawn_session(&self.calibration)),
+                .or_insert_with(|| spawn_session(&self.calibration, &self.server_instance)),
         );
         *session.last_access.lock().unwrap() = now;
         session
     }
 }
 
-fn spawn_session(calibration: &StandCalibration) -> Arc<SessionState> {
+fn spawn_session(calibration: &StandCalibration, server_instance: &str) -> Arc<SessionState> {
     let facelets = new_facelets();
     let (updates_tx, updates_rx) = mpsc::channel();
     let (inbound_tx, inbound_rx) = mpsc::channel();
@@ -1268,20 +1266,23 @@ fn spawn_session(calibration: &StandCalibration) -> Arc<SessionState> {
         last_access: Mutex::new(Instant::now()),
         stop: Arc::clone(&stop),
         animation_speed: Arc::clone(&animation_speed),
+        server_instance: server_instance.to_owned(),
     });
 
     std::thread::Builder::new()
         .name("sim-session-daemon".into())
         .spawn({
             let calibration = calibration.clone();
-            move || run_session_daemon(
-                calibration,
-                facelets,
-                inbound_rx,
-                updates_tx,
-                stop,
-                animation_speed,
-            )
+            move || {
+                run_session_daemon(
+                    calibration,
+                    facelets,
+                    inbound_rx,
+                    updates_tx,
+                    stop,
+                    animation_speed,
+                )
+            }
         })
         .expect("failed to spawn simulation daemon");
     std::thread::Builder::new()
@@ -1394,7 +1395,9 @@ fn run_pump(updates: mpsc::Receiver<SimUpdate>, state: Arc<SessionState>) {
             state.broadcast(cube.to_string());
         }
         if sim.any_axis_moving() || (sim.dirty && sim.status.is_some()) {
-            state.broadcast(sim.status_json().to_string());
+            let mut status = sim.status_json();
+            status["server_instance"] = json!(state.server_instance);
+            state.broadcast(status.to_string());
             sim.dirty = false;
         }
         drop(sim);
@@ -1661,12 +1664,20 @@ async fn sse_events(
     };
     let session = state.session(id);
     let rx = session.subscribers.subscribe();
-    let stream = BroadcastStream::new(rx).filter_map(|message| match message {
+    let hello = axum::response::sse::Event::default().data(
+        json!({
+            "type": "server",
+            "server_instance": session.server_instance,
+        })
+        .to_string(),
+    );
+    let updates = BroadcastStream::new(rx).filter_map(|message| match message {
         Ok(text) => Some(Ok::<_, Infallible>(
             axum::response::sse::Event::default().data(text),
         )),
         Err(_) => None, // lagged receiver: skip, next status catches up
     });
+    let stream = tokio_stream::once(Ok::<_, Infallible>(hello)).chain(updates);
     Sse::new(stream)
         .keep_alive(
             KeepAlive::new()
@@ -1685,7 +1696,8 @@ async fn api_status(
         Err(error) => return error_response(StatusCode::BAD_REQUEST, error),
     };
     let session = state.session(id);
-    let body = session.sim.lock().unwrap().status_json();
+    let mut body = session.sim.lock().unwrap().status_json();
+    body["server_instance"] = json!(session.server_instance);
     (
         [(header::CONTENT_TYPE, "application/json")],
         body.to_string(),
@@ -1709,9 +1721,7 @@ async fn post_command(
     };
 
     if let Command::SetAnimationSpeed { multiplier } = &command {
-        state
-            .animation_speed
-            .store(*multiplier, Ordering::Relaxed);
+        state.animation_speed.store(*multiplier, Ordering::Relaxed);
         state.sim.lock().unwrap().set_animation_speed(*multiplier);
         return (
             StatusCode::OK,
@@ -1863,9 +1873,14 @@ fn error_response(status: StatusCode, message: &str) -> Response {
 /// independent protocol service, stand, scanner, cube, SSE stream and safety
 /// monitor; no command or state is shared between tabs.
 pub fn run_sim_server(addr: &str, calibration: StandCalibration) -> Result<()> {
+    let started = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
     let state = Arc::new(AppState {
         calibration,
         sessions: Mutex::new(HashMap::new()),
+        server_instance: format!("{}-{started}", std::process::id()),
     });
 
     let runtime = tokio::runtime::Builder::new_multi_thread()

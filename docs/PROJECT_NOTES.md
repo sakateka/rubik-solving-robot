@@ -2930,3 +2930,245 @@ Cube20 использует компактную запись без пробе�
 Это hardware-free dry-run: I²C и сервоприводы не использовались. Следующая
 проверка — прогнать реальные solver solutions и после замены сломанной шестерни
 физически проверить последовательности с наибольшей экономией.
+
+---
+
+## 16. Server-authoritative 3D simulator
+
+Большой этап симулятора собран в conventional commit:
+
+```text
+104cc5a feat(sim): add reliable server-side visual simulation
+```
+
+Цель этого этапа — использовать 3D-сцену не только как демонстрацию, а как
+предварительный safety gate перед запуском тех же планов на физической механике.
+Симулятор должен обнаруживать неправильный порядок движений, потерю удержания,
+коллизии и рассинхрон куба/захватов раньше реального стенда.
+
+### Запуск native simulator
+
+```sh
+cargo run --features pca9685 --bin rubik-robotd-sim -- --addr 127.0.0.1:8022
+```
+
+HTML, Three.js и STL встроены в binary через `include_str!`/`include_bytes!`,
+поэтому сервер остаётся одним самодостаточным executable. Каждый запуск
+получает уникальный `server_instance_id`. Открытая вкладка сохраняет старый ID,
+после рестарта автоматически переподключается к SSE, видит новый ID и сама
+выполняет `location.reload()`. Ручной reload после пересборки не требуется.
+
+Сам server-side state при рестарте процесса, естественно, создаётся заново;
+автоматический reload гарантирует, что UI и embedded assets соответствуют новой
+сборке и не продолжают показывать код предыдущего binary.
+
+### Изолированные server-side sessions
+
+Каждая вкладка браузера получает отдельную simulator session. Внутри session
+на сервере независимо живут:
+
+- собственный `RobotService` и protocol request ID sequence;
+- состояние стенда, scan, solution и cube session;
+- логический куб и его facelets/cubies;
+- visual replay и presentation basis;
+- collision/safety monitor;
+- SSE stream и animation speed.
+
+Session ID хранится в browsing context (`window.name`) и добавляется к HTTP/SSE
+запросам. Reload той же вкладки снова подключается к прежней server session и
+читает авторитетный cube snapshot. Другая вкладка не видит действия и
+Playwright-прогоны первой. Старые sessions удаляются по TTL; количество
+одновременно живущих sessions ограничено.
+
+Это устранило прежнюю ошибочную модель, где браузер самостоятельно хранил и
+перекрашивал куб. Three.js больше не является источником истины.
+
+### Авторитетная модель куба
+
+`src/sim_server.rs` содержит `ServerCube`: 26 cubies с целочисленной позицией и
+ортонормированным basis. Каждый завершённый логический layer turn применяется
+к этой модели, после чего сервер публикует атомарный cube snapshot и обновляет
+facelets виртуального scanner.
+
+Browser применяет snapshot только после опустошения animation queue. Счётчик
+`cubeSnapshotCorrections` в debug probe позволяет тестам обнаружить ситуацию,
+когда snapshot был вынужден исправить разошедшуюся визуальную модель. В
+нормальном scan/solve/execute этот счётчик не должен расти.
+
+Кнопка `Load` рядом с `Run moves` создаёт новый scramble из solved-state
+мгновенно на сервере. Она не двигает rails/grippers и не запускает layer
+animation, поэтому подходит для загрузки тестовых позиций.
+
+Simulator принимает обе нотации:
+
+```text
+R U R' U2
+B2L1B2R3F3U3B3L1D3F3L1U1L2B2L3D2B2D2R2B2
+```
+
+Для compact Cube20 notation действует преобразование `X1 -> X`, `X2 -> X2`,
+`X3 -> X'`; пробелы не требуются. Нормализация используется одинаково для
+`Load` и `Run moves`, включая повторный parse для visual replay.
+
+### Синхронизация механики и 3D-анимации
+
+Rail/gripper interpolation вычисляется из server status и timing
+`StandCalibration`. Куб не «догоняет» закончившийся gripper отдельным
+перекрашиванием: активный layer получает ту же server-driven fraction.
+
+Для whole-cube scan/reorientation используется явный signed axis turn и
+целочисленный presentation basis. Это заменило неоднозначный quaternion slerp,
+который для 180 градусов мог выбрать неожиданный путь или дать визуальный
+скачок. Поворот на 180 градусов занимает вдвое больше времени, чем на 90.
+
+Layer tween идентифицируется ключом:
+
+```text
+operation_id + move_index + face + turns
+```
+
+Progress следующего хода не может управлять pivot предыдущего. Перед новым
+ключом предыдущий server-driven pivot детерминированно завершается. Fraction
+внутри одного хода монотонна и не может визуально откатить слой назад при
+пересчёте телеметрии.
+
+Quarter-turn direction берётся из Singmaster move. Для `X2` знак визуального
+пути (`+180` или `-180`) берётся из фактического `current -> target` gripper:
+оба знака дают одинаковую перестановку куба, но только один совпадает с
+направлением физического захвата.
+
+Отдельно проверяется, что двигающийся physical gripper axis действительно
+владеет ожидаемой logical face. В canonical frame это `L/R/U/D`, а во временно
+развёрнутом Front/Back frame левый/правый захват соответствуют `B/F`.
+
+### Scan и orientation
+
+Scan visual replay вращает полный куб синхронно с противоположной парой
+захватов, показывает шесть capture events и возвращает presentation basis в
+canonical Front. Scanner facelets читаются из server cube, а не из пикселей
+Three.js.
+
+Ориентация sticker net сверена с row-major scanner contract и min2phase:
+развёртка не должна быть повёрнута на 180 градусов или зеркально отражена
+относительно стороны, на которую смотрит камера.
+
+Wireframe `THREE.CameraHelper` всегда скрыт, чтобы при capture не появлялись
+однокадровые линии. В сцене оставлена постоянная декоративная модель scanner
+camera в стиле Blender.
+
+### Solution lifecycle
+
+Simulator отдельно хранит последнюю непустую `SolutionStatus`. После завершения
+`Execute` или `Auto` список ходов остаётся в секции Solution со статусом
+`last completed`. Он очищается только при принятии следующего `Scan` или
+`Auto`, а не в момент, когда protocol service завершает операцию и очищает
+active solution.
+
+При повторном сценарии:
+
+```text
+Load A -> Grip -> Auto -> Load B -> Grip -> Auto
+```
+
+второй Auto игнорирует старое solution по его ID и ждёт новый solver result.
+Иначе visual replay мог сопоставить новый physical plan со списком ходов
+предыдущего куба.
+
+### Cold-start и механическая безопасность
+
+Полный recovery из неизвестного состояния намеренно сериализован:
+
+```text
+rails open -> wait until stable -> grippers to safe perpendicular -> wait
+```
+
+Rails и grippers не начинают cold recovery одновременно. Это повторяет
+необходимое правило физического стенда: неизвестно лежащий между захватами куб
+нельзя считать безопасно удержанным.
+
+`Grip` не выполняет автоматический recovery. Если куб физически лежит между
+захватами в неизвестной позе, автоматическое раскрытие перед Grip может сломать
+механику. Оператор обязан явно выполнить `Recover -> Open`, когда это безопасно.
+
+Server safety monitor проверяет как минимум:
+
+- пересечение соседних frame-parallel grippers;
+- потерю custody, когда ни одна противоположная пара не удерживает cube
+  session;
+- одновременное движение rails и grippers в планах, где оно запрещено;
+- возврат scan/reorientation в canonical cube pose;
+- соответствие physical gripper axis анимируемой logical face.
+
+Нарушения накапливаются в `safety.violations`, подсвечиваются в UI и являются
+ошибкой интеграционных тестов.
+
+### UI сцены
+
+Вместо условных захватов загружается `web/rcr_gripper-v5.stl`. Захваты сдвинуты
+ближе к кубу без изменения разницы между open/grip reach, поэтому сохранён
+полный рабочий ход rails. Метки `L`, `R`, `U`, `D` являются decal meshes на
+поверхности STL и вращаются вместе с деталями.
+
+Mouse orbit обновляется во время pointer drag, а не только после release.
+Добавлен Blender-style axis gizmo и scanner camera prop. Названия `Top/Bottom`
+в операторском UI заменены на `Up/Down`.
+
+Слева от развёртки есть session-local кнопки `x2`, `x4`, `x8`. Повторное
+нажатие активной скорости возвращает `x1`. Ускорение применяется к server
+virtual clock, механической операции и интерполяции, а не только к
+косметическому browser tween.
+
+### Playwright safety suite
+
+Добавлен `tests/ui` с 13 Playwright-тестами и общими fixtures/debug probes.
+Основные сценарии:
+
+- независимость двух browser sessions;
+- cold recovery без одновременного rail/gripper motion;
+- reload той же session с server cube snapshot;
+- мгновенный `Load` compact Cube20 scramble без движения механики;
+- per-session animation speed;
+- геометрия open/grip и отсутствие пересечения четырёх STL grippers;
+- непрерывный mouse orbit;
+- плавный `R U F' D` с точной итоговой cubie permutation;
+- signed half-turn, совпадающий с physical gripper;
+- полный scan/solve/execute с шестью faces и canonical presentation;
+- все 18 вариантов `X`, `X'`, `X2` для шести граней;
+- сохранение solution после Auto;
+- два разных `Load -> Auto` подряд без replay старого решения.
+
+Большинство fixtures автоматически выбирает `x8`, поэтому session каждого
+теста ускоряется независимо. Тесты, измеряющие промежуточные animation frames,
+работают на `x2`.
+
+Запуск:
+
+```sh
+cd tests/ui
+npm ci
+npx playwright test
+```
+
+### Следующий возможный этап: WASM/Worker и GitHub Pages
+
+Подробный незакоммиченный план записан в `docs/wasm-simulator.md`.
+
+Коротко: server-independent состояние нужно вынести из `src/sim_server.rs` в
+общий детерминированный `SimCore`, которым будут пользоваться два адаптера:
+
+```text
+native:  sim.html <-> HTTP/SSE <-> axum <-> SimCore
+pages:   sim.html <-> postMessage <-> dedicated Web Worker/WASM <-> SimCore
+```
+
+Axum/Tokio/TCP не переносятся в WASM. В `web/sim.html` появятся
+`HttpSimTransport` и `WorkerSimTransport`; scene/rendering останутся общими.
+`RobotService::begin_solver`, который сейчас использует `std::thread`, должен
+получить `SolverBackend`: threaded для native и inline внутри dedicated Worker
+для WASM.
+
+Каждая вкладка получит свой Worker и, следовательно, изолированный runtime.
+Reload сможет восстановить только versioned authoritative checkpoint,
+сохранённый на безопасной idle boundary. Промежуточная Three.js-сцена никогда
+не сохраняется как состояние робота. Native simulator останется финальным
+safety gate перед физической механикой, даже после появления Pages demo.

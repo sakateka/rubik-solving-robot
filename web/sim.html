@@ -1123,6 +1123,8 @@ function handleCollision(msg) {
     msg.active ? 'col' : 'ev');
 }
 
+let serverInstance = null;
+let reloadingForServer = false;
 function connectEvents() {
   const es = new EventSource(sessionUrl('/events'));
   es.onopen = () => setBadge('connBadge', 'connected', 'ok');
@@ -1132,7 +1134,20 @@ function connectEvents() {
     setTimeout(connectEvents, 1500);
   };
   es.onmessage = e => {
-    try { handleServerMessage(JSON.parse(e.data)); } catch { /* ignore */ }
+    try {
+      const msg = JSON.parse(e.data);
+      if (msg.server_instance) {
+        if (serverInstance && serverInstance !== msg.server_instance) {
+          if (!reloadingForServer) {
+            reloadingForServer = true;
+            location.reload();
+          }
+          return;
+        }
+        serverInstance = msg.server_instance;
+      }
+      handleServerMessage(msg);
+    } catch { /* ignore */ }
   };
 }
 
