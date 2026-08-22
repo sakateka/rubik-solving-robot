@@ -22,6 +22,7 @@ pub struct VisionScanner {
     detector: CviTpuDetector,
     confidence: f32,
     iou: f32,
+    scan_discard_frames: u32,
     record_dir: PathBuf,
     active_record: Option<PathBuf>,
 }
@@ -30,6 +31,7 @@ impl VisionScanner {
     pub fn open(
         sensor_config: &Path,
         warmup_frames: u32,
+        scan_discard_frames: u32,
         cvimodel: &Path,
         confidence: f32,
         iou: f32,
@@ -45,6 +47,7 @@ impl VisionScanner {
             detector,
             confidence,
             iou,
+            scan_discard_frames,
             record_dir,
             active_record: None,
         })
@@ -112,6 +115,7 @@ impl FaceScanner for VisionScanner {
     }
 
     fn capture(&mut self, face: link::CubeFace) -> Result<link::RecognizedFace> {
+        self.camera.warmup_vpss(self.scan_discard_frames)?;
         let (_, rgb) = self.camera.capture_vpss_rgb()?;
         let input = preprocess::cube_roi_vpss_rgb(&rgb)?;
         let detections = self.detector.detect(&input)?;

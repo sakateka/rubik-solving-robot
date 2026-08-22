@@ -3284,6 +3284,14 @@ BusyBox `logger` с syslog tag `rubik-robotd`; постоянный отдель
 После изменений прошли host test suite и полный production cross-build через
 `scripts/build-duo.sh`.
 
+Для проверки гипотезы о первом кадре production daemon принимает отдельную
+опцию `--scan-discard-frames <N>` (по умолчанию `0`). Перед захватом каждой
+стороны `VisionScanner` получает и освобождает `N` кадров VPSS, после чего
+обрабатывает следующий кадр. Это не меняет одноразовый startup
+`--warmup-frames` (по умолчанию `10`): оба механизма независимы. Например,
+`--scan-discard-frames 3` отбрасывает три кадра непосредственно перед каждой из
+шести сторон.
+
 ### Следующий возможный этап: WASM/Worker и GitHub Pages
 
 Подробный незакоммиченный план записан в `docs/wasm-simulator.md`.

@@ -48,6 +48,10 @@ struct Cli {
     #[arg(long, default_value_t = 10)]
     warmup_frames: u32,
 
+    /// VPSS frames discarded before every scanned face
+    #[arg(long, default_value_t = 0)]
+    scan_discard_frames: u32,
+
     /// Production CV181X TPU model
     #[arg(long, default_value = "/mnt/storage/cube_yolov8n_320_bf16.cvimodel")]
     cvimodel: PathBuf,
@@ -122,6 +126,7 @@ fn main() -> Result<()> {
     let scanner = VisionScanner::open(
         &cli.sensor_config,
         cli.warmup_frames,
+        cli.scan_discard_frames,
         &cli.cvimodel,
         cli.conf,
         cli.iou,
