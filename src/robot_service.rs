@@ -1043,8 +1043,10 @@ where
                 self.command_rail_pair(physical, logical[0], logical[1], position)
             }
             RailTarget::Single(axis) => {
-                self.output
-                    .set_channels(&[(axis.channel(), self.calibration.rail_pulse(position))])?;
+                self.output.set_channels(&[(
+                    axis.channel(),
+                    self.calibration.rail_pulse(axis, position),
+                )])?;
                 let rail = &mut self.status.stand.rails[stand_axis_index(axis)];
                 rail.motion = link::AxisMotion::Moving;
                 rail.target = Some(link_rail_position(position));
@@ -1541,7 +1543,7 @@ where
             .map(|axis| {
                 (
                     axis.channel(),
-                    self.calibration.rail_pulse(RailPosition::NearGrip),
+                    self.calibration.rail_pulse(axis, RailPosition::NearGrip),
                 )
             })
             .collect::<Vec<_>>();
@@ -1601,7 +1603,8 @@ where
         second: link::Axis,
         position: RailPosition,
     ) -> anyhow::Result<()> {
-        let channels = physical.map(|axis| (axis.channel(), self.calibration.rail_pulse(position)));
+        let channels =
+            physical.map(|axis| (axis.channel(), self.calibration.rail_pulse(axis, position)));
         self.output.set_channels(&channels)?;
         let target = match position {
             RailPosition::FarOpen => link::RailPosition::Open,

@@ -115,7 +115,7 @@ fn main() -> Result<()> {
 fn rail_channels(calibration: &StandCalibration, position: RailPosition) -> Vec<(u8, u16)> {
     StandAxis::RAILS
         .into_iter()
-        .map(|axis| (axis.channel(), calibration.rail_pulse(position)))
+        .map(|axis| (axis.channel(), calibration.rail_pulse(axis, position)))
         .collect()
 }
 

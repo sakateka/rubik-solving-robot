@@ -4,11 +4,13 @@
 [rails]
 far_open_us = 2500
 near_grip_us = 1200
+left_near_grip_us = 1175
+right_near_grip_us = 1175
 
 [timing]
 # The safe open phase must finish before any gripper rotates.
-rails_open_ms = 2000
-rails_grip_ms = 2000
+rails_open_ms = 1200
+rails_grip_ms = 1200
 gripper_pose_ms = 1000
 
 [grippers.left]

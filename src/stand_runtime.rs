@@ -650,7 +650,7 @@ where
 
     fn move_rail(&mut self, rail: StandAxis, position: RailPosition) -> Result<()> {
         debug_assert!(!rail.is_gripper());
-        self.set_channels(&[(rail.channel(), self.calibration.rail_pulse(position))])?;
+        self.set_channels(&[(rail.channel(), self.calibration.rail_pulse(rail, position))])?;
         self.delay.sleep(self.calibration.rail_duration(position));
         self.disable_channels(&[rail.channel()])
     }
@@ -807,7 +807,7 @@ where
 fn rail_channels(calibration: &StandCalibration, position: RailPosition) -> Vec<(u8, u16)> {
     StandAxis::RAILS
         .into_iter()
-        .map(|axis| (axis.channel(), calibration.rail_pulse(position)))
+        .map(|axis| (axis.channel(), calibration.rail_pulse(axis, position)))
         .collect()
 }
 
@@ -821,7 +821,7 @@ fn rail_pair_channels(
         RailPair::TopBottom => [StandAxis::TopRail, StandAxis::BottomRail],
     };
     axes.into_iter()
-        .map(|axis| (axis.channel(), calibration.rail_pulse(position)))
+        .map(|axis| (axis.channel(), calibration.rail_pulse(axis, position)))
         .collect()
 }
 

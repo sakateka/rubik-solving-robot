@@ -116,6 +116,10 @@ pub struct StandCalibration {
 pub struct RailCalibration {
     pub far_open_us: u16,
     pub near_grip_us: u16,
+    #[serde(default)]
+    pub left_near_grip_us: Option<u16>,
+    #[serde(default)]
+    pub right_near_grip_us: Option<u16>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -152,6 +156,8 @@ impl Default for StandCalibration {
             rails: RailCalibration {
                 far_open_us: 2500,
                 near_grip_us: 1200,
+                left_near_grip_us: Some(1175),
+                right_near_grip_us: Some(1175),
             },
             grippers: GrippersCalibration {
                 left: GripperCalibration {
@@ -200,10 +206,21 @@ impl StandCalibration {
         Ok(calibration)
     }
 
-    pub fn rail_pulse(&self, position: RailPosition) -> u16 {
+    pub fn rail_pulse(&self, axis: StandAxis, position: RailPosition) -> u16 {
+        debug_assert!(!axis.is_gripper());
         match position {
             RailPosition::FarOpen => self.rails.far_open_us,
-            RailPosition::NearGrip => self.rails.near_grip_us,
+            RailPosition::NearGrip => match axis {
+                StandAxis::LeftRail => self
+                    .rails
+                    .left_near_grip_us
+                    .unwrap_or(self.rails.near_grip_us),
+                StandAxis::RightRail => self
+                    .rails
+                    .right_near_grip_us
+                    .unwrap_or(self.rails.near_grip_us),
+                _ => self.rails.near_grip_us,
+            },
         }
     }
 
@@ -237,6 +254,12 @@ impl StandCalibration {
     fn validate(&self) -> Result<()> {
         validate_pulse("rails.far_open_us", self.rails.far_open_us, 300, 2800)?;
         validate_pulse("rails.near_grip_us", self.rails.near_grip_us, 300, 2800)?;
+        if let Some(pulse) = self.rails.left_near_grip_us {
+            validate_pulse("rails.left_near_grip_us", pulse, 300, 2800)?;
+        }
+        if let Some(pulse) = self.rails.right_near_grip_us {
+            validate_pulse("rails.right_near_grip_us", pulse, 300, 2800)?;
+        }
         validate_duration("timing.rails_open_ms", self.timing.rails_open_ms)?;
         validate_duration("timing.rails_grip_ms", self.timing.rails_grip_ms)?;
         validate_duration("timing.gripper_pose_ms", self.timing.gripper_pose_ms)?;
@@ -395,7 +418,22 @@ mod tests {
     fn default_calibration_matches_the_current_stand() {
         let calibration = StandCalibration::default();
         calibration.validate().unwrap();
-        assert_eq!(calibration.rail_pulse(RailPosition::FarOpen), 2500);
+        assert_eq!(
+            calibration.rail_pulse(StandAxis::LeftRail, RailPosition::FarOpen),
+            2500
+        );
+        assert_eq!(
+            calibration.rail_pulse(StandAxis::LeftRail, RailPosition::NearGrip),
+            1175
+        );
+        assert_eq!(
+            calibration.rail_pulse(StandAxis::RightRail, RailPosition::NearGrip),
+            1175
+        );
+        assert_eq!(
+            calibration.rail_pulse(StandAxis::TopRail, RailPosition::NearGrip),
+            1200
+        );
         assert_eq!(
             calibration.gripper_pulse(StandAxis::BottomGripper, GripperOrientation::FrameParallel),
             Some(400)
