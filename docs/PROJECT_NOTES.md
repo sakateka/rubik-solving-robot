@@ -3187,6 +3187,60 @@ npm ci
 npx playwright test
 ```
 
+### Поканальная калибровка, автозапуск и сохранность scan artifacts
+
+Для прижима rails сохранён общий fallback `near_grip_us = 1200`, но добавлены
+опциональные поканальные overrides:
+
+```toml
+[rails]
+far_open_us = 2500
+near_grip_us = 1200
+left_near_grip_us = 1175
+right_near_grip_us = 1175
+
+[timing]
+rails_open_ms = 1200
+rails_grip_ms = 1200
+```
+
+Левая и правая rails теперь прижимают куб импульсом `1175 us`, верхняя и
+нижняя продолжают использовать общий `1200 us`. Поля overrides имеют
+`serde(default)`, поэтому старые TOML-файлы без них остаются совместимыми.
+Runtime выбирает pulse по физической оси во всех путях: одиночная rail,
+противоположная пара, полный Grip и recovery.
+
+Для автозапуска production daemon добавлен BusyBox/SysV script
+`scripts/S99z-rubik-robotd`. На плате он устанавливается как
+`/etc/init.d/S99z-rubik-robotd`; суффикс `z` оставляет его после штатного
+`S99user`, который поднимает Milk-V hardware stack. Script экспортирует пути к
+vendor shared libraries, запускает `/mnt/storage/rubik-robotd` через
+`start-stop-daemon` с `--confirm-stand-motion` и конфигурацией
+`/mnt/storage/stand.toml`, а также поддерживает `start`, `stop` и `restart`.
+
+Production `VisionScanner` после успешной записи PNG, YOLO labels и распознанной
+матрицы каждой стороны вызывает системный `sync`. Только после успешного
+завершения `sync` capture возвращает recognized face в `RobotService`; ошибка
+запуска или выполнения `sync` считается ошибкой стороны. Это сокращает окно
+потери уже записанных артефактов при внезапном отключении питания.
+
+Имя каталога daemon scan теперь всегда заканчивается атомарно выделяемым
+числовым индексом:
+
+```text
+scan-2026-08-22_10-00-00-r1-001
+scan-2026-08-22_10-00-00-r1-002
+```
+
+При совпадении системного времени и scan revision после reboot код перебирает
+индексы и вызывает `create_dir` для каждого кандидата. `AlreadyExists` ведёт к
+следующему индексу, а любая другая filesystem error прерывает scan. Поэтому
+старые artifacts не перезаписываются даже при постоянно сбрасывающихся часах;
+атомарный `create_dir` также закрывает гонку между совпавшими попытками.
+
+После изменений прошли host test suite и полный production cross-build через
+`scripts/build-duo.sh`.
+
 ### Следующий возможный этап: WASM/Worker и GitHub Pages
 
 Подробный незакоммиченный план записан в `docs/wasm-simulator.md`.

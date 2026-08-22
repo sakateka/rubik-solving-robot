@@ -106,10 +106,8 @@ impl VisionScanner {
 impl FaceScanner for VisionScanner {
     fn begin_scan(&mut self, revision: u32) -> Result<()> {
         std::fs::create_dir_all(&self.record_dir)?;
-        let directory = self
-            .record_dir
-            .join(format!("scan-{}-r{revision}", utc_timestamp()?));
-        std::fs::create_dir(&directory)?;
+        let prefix = format!("scan-{}-r{revision}", utc_timestamp()?);
+        let directory = create_indexed_record_dir(&self.record_dir, &prefix)?;
         self.active_record = Some(directory);
         Ok(())
     }
@@ -174,6 +172,25 @@ fn sync_filesystems() -> Result<()> {
         bail!("sync failed after saving scan face with status {status}");
     }
     Ok(())
+}
+
+fn create_indexed_record_dir(base: &Path, prefix: &str) -> Result<PathBuf> {
+    for index in 1..=u32::MAX {
+        let directory = base.join(format!("{prefix}-{index:03}"));
+        match std::fs::create_dir(&directory) {
+            Ok(()) => return Ok(directory),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "could not create scan record directory {}",
+                        directory.display()
+                    )
+                });
+            }
+        }
+    }
+    bail!("exhausted scan record indexes for prefix {prefix:?}")
 }
 
 fn recognized_face(detections: &[Detection]) -> Result<link::RecognizedFace> {
