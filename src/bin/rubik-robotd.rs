@@ -3,6 +3,7 @@
 use anyhow::{bail, Result};
 use clap::Parser;
 use rubik_scan::{
+    operator_button::{ButtonInput, OperatorButton, SysfsActiveLowButton, DUO256M_GP21_GPIO},
     pca9685::Pca9685,
     robot_daemon::{run_uart_daemon, UartDaemonOptions},
     robot_service::RobotService,
@@ -10,6 +11,7 @@ use rubik_scan::{
     vision_scanner::VisionScanner,
 };
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 #[derive(Parser)]
 #[command(about = "Run the UART robot control service")]
@@ -65,6 +67,22 @@ struct Cli {
     /// Required acknowledgement that remote commands may move the stand
     #[arg(long)]
     confirm_stand_motion: bool,
+
+    /// Linux GPIO number for the active-low operator button (Duo256M GP21)
+    #[arg(long, default_value_t = DUO256M_GP21_GPIO)]
+    button_gpio: u32,
+
+    /// Disable the physical operator button (diagnostics only)
+    #[arg(long)]
+    no_button: bool,
+
+    /// Stable active-low time required for one button press
+    #[arg(
+        long,
+        default_value_t = 50,
+        value_parser = clap::value_parser!(u64).range(10..=1000)
+    )]
+    button_debounce_ms: u64,
 }
 
 fn main() -> Result<()> {
@@ -77,6 +95,27 @@ fn main() -> Result<()> {
     let calibration = match &cli.config {
         Some(path) => StandCalibration::load(path)?,
         None => StandCalibration::default(),
+    };
+    let operator_button = if cli.no_button {
+        eprintln!("operator button disabled");
+        None
+    } else {
+        let input = if cli.button_gpio == DUO256M_GP21_GPIO {
+            SysfsActiveLowButton::open_duo256m_gp21()?
+        } else {
+            SysfsActiveLowButton::open(cli.button_gpio)?
+        };
+        eprintln!(
+            "operator button gpio={} active_low=true debounce_ms={}",
+            input.gpio(),
+            cli.button_debounce_ms
+        );
+        let input: Box<dyn ButtonInput> = Box::new(input);
+        Some(OperatorButton::new(
+            input,
+            Duration::from_millis(cli.button_debounce_ms),
+            Instant::now(),
+        ))
     };
     let mut output = Pca9685::open(&cli.i2c_device, cli.address)?;
     let pwm = output.initialize_safe_pwm(cli.pwm_hz)?;
@@ -92,8 +131,10 @@ fn main() -> Result<()> {
     run_uart_daemon(
         UartDaemonOptions {
             process_name: "rubik-robotd",
-            uart_device: &cli.uart_device,
+            uart_device: Some(&cli.uart_device),
             skip_uart_config: cli.skip_uart_config,
+            hub: None,
+            operator_button,
         },
         RobotService::with_scanner(output, calibration, scanner),
     )

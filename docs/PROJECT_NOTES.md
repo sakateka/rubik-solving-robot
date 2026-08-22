@@ -91,6 +91,19 @@ motion plan остаются на Duo, поэтому переподключен
 перед обычным использованием. Полный API и процедура сборки описаны в
 `docs/ROBOT_CONTROL_PROTOCOL.md` и `firmware/esp32c6-controller/README.md`.
 
+Физическая operator button подключается двумя проводами active-low между
+`GP21` и GND; `GP21` на Duo256M соответствует `XGPIOA[26]` и Linux GPIO `506`.
+Внешний резистор не нужен: daemon проверяет GPIO pinmux, выставляет internal
+weak pull-up через vendor-defined pad register `0x03001918` и проверяет
+read-back до открытия GPIO. Эта настройка подтверждена на стенде: released
+button читается как `1`, pressed — как `0`. Daemon применяет debounce 50 ms и
+выбирает действие по своему authoritative state:
+`Open → Grip → ScanSolveExecute`, любой другой idle state → `RecoverToOpen`,
+active operation → `Abort → RecoverToOpen`. Follow-up после Grip привязан к
+созданным operation/session IDs. Recovery после Abort запускается только из
+`Aborted`, но не из `Faulted`; зажатая при старте кнопка игнорируется до
+отпускания и нового нажатия.
+
 Ближайшая программная граница после camera scan: ввести типы `StickerColor`,
 `Face`, `CubeState`, таблицу scan poses и адаптер конкретной Rust-библиотеки
 solver. Управление реальными servo следует подключать после того, как state и

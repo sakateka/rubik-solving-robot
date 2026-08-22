@@ -1,6 +1,7 @@
 //! Shared UART event loop for hardware-backed and simulated robot daemons.
 
 use crate::{
+    operator_button::{ButtonInput, OperatorButton},
     pca9685::PwmOutput,
     robot_link::{ReceivedPacket, UartFrameEncoder, UartStreamDecoder},
     robot_service::{FaceScanner, RobotService, ServiceMessage},
@@ -65,6 +66,7 @@ pub struct UartDaemonOptions<'a> {
     pub uart_device: Option<&'a Path>,
     pub skip_uart_config: bool,
     pub hub: Option<DaemonHub>,
+    pub operator_button: Option<OperatorButton<Box<dyn ButtonInput>>>,
 }
 
 pub fn run_uart_daemon<D, S>(
@@ -80,6 +82,7 @@ where
         uart_device,
         skip_uart_config,
         mut hub,
+        mut operator_button,
     } = options;
 
     let (writer, receiver) = match uart_device {
@@ -113,9 +116,7 @@ where
             process_name,
             path.display()
         ),
-        None => eprintln!(
-            "{process_name} ready uart=none pose=unknown; send RecoverToOpen first"
-        ),
+        None => eprintln!("{process_name} ready uart=none pose=unknown; send RecoverToOpen first"),
     }
 
     if let Some(hub) = hub.as_mut() {
@@ -129,7 +130,10 @@ where
         &mut encoder,
         writer.as_ref(),
         &mut service,
-        hub.as_mut(),
+        DaemonControls {
+            hub: hub.as_mut(),
+            operator_button: operator_button.as_mut(),
+        },
     );
     let shutdown_result = service.shutdown();
 
@@ -146,6 +150,11 @@ where
     }
 }
 
+struct DaemonControls<'a> {
+    hub: Option<&'a mut DaemonHub>,
+    operator_button: Option<&'a mut OperatorButton<Box<dyn ButtonInput>>>,
+}
+
 fn run_event_loop<D, S>(
     running: &AtomicBool,
     receiver: Option<&mpsc::Receiver<std::io::Result<Vec<u8>>>>,
@@ -153,13 +162,34 @@ fn run_event_loop<D, S>(
     encoder: &mut UartFrameEncoder,
     writer: Option<&File>,
     service: &mut RobotService<D, S>,
-    mut hub: Option<&mut DaemonHub>,
+    controls: DaemonControls<'_>,
 ) -> Result<()>
 where
     D: PwmOutput,
     S: FaceScanner,
 {
+    let DaemonControls {
+        mut hub,
+        mut operator_button,
+    } = controls;
     while running.load(Ordering::SeqCst) {
+        if let Some(button) = operator_button.as_mut() {
+            let now = Instant::now();
+            if let Some(command) = button
+                .poll(service.status(), now)
+                .context("failed to read operator button")?
+            {
+                let (outcome, messages) = service.handle_local_command(command, now);
+                eprintln!("operator button command={command:?} outcome={outcome:?}");
+                button.command_finished(command, outcome);
+                write_messages(writer, encoder, &messages)?;
+                if let Some(hub) = hub.as_mut() {
+                    hub.observer.observe_messages(&messages);
+                    hub.observer.observe_status(service.status());
+                }
+            }
+        }
+
         if let Some(hub) = hub.as_mut() {
             while let Some(bytes) = hub.try_recv_inbound() {
                 for byte in bytes {

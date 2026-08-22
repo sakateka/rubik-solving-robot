@@ -91,6 +91,21 @@ pub enum ServiceMessage {
     Event(EventMessage),
 }
 
+/// A command generated locally on the Duo rather than by a packet transport.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LocalCommand {
+    RecoverToOpen,
+    Grip,
+    ScanSolveExecute { session_id: u32 },
+    Abort,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LocalCommandOutcome {
+    Accepted { operation_id: Option<u32> },
+    Rejected(link::RejectionReason),
+}
+
 impl ServiceMessage {
     pub fn encode_uart<'a>(
         &self,
@@ -310,6 +325,52 @@ where
         let mut messages = vec![ServiceMessage::Response(response)];
         messages.extend(self.drain_events().map(ServiceMessage::Event));
         messages
+    }
+
+    /// Runs a command from a local hardware control through the same admission
+    /// and operation primitives as protocol requests. Only events are returned:
+    /// there is no remote requester to receive a protocol response.
+    pub fn handle_local_command(
+        &mut self,
+        command: LocalCommand,
+        now: Instant,
+    ) -> (LocalCommandOutcome, Vec<ServiceMessage>) {
+        let outcome = match command {
+            LocalCommand::RecoverToOpen => self
+                .start_operation(link::OperationKind::RecoverToOpen, now)
+                .map_or_else(LocalCommandOutcome::Rejected, |operation_id| {
+                    LocalCommandOutcome::Accepted {
+                        operation_id: Some(operation_id),
+                    }
+                }),
+            LocalCommand::Grip => self
+                .start_operation(link::OperationKind::Grip, now)
+                .map_or_else(LocalCommandOutcome::Rejected, |operation_id| {
+                    LocalCommandOutcome::Accepted {
+                        operation_id: Some(operation_id),
+                    }
+                }),
+            LocalCommand::ScanSolveExecute { session_id } => {
+                let response =
+                    self.start_scan_operation(0, session_id, link::OperationKind::ScanSolveExecute);
+                match response.payload {
+                    ResponsePayload::Accepted(accepted) => LocalCommandOutcome::Accepted {
+                        operation_id: accepted.operation_id,
+                    },
+                    ResponsePayload::Rejected(rejected) => {
+                        LocalCommandOutcome::Rejected(rejected.reason)
+                    }
+                    ResponsePayload::Status(_) => unreachable!("local operation returned status"),
+                }
+            }
+            LocalCommand::Abort => {
+                let operation_id = self.status.active_operation.map(|operation| operation.id);
+                self.abort(operation_id);
+                LocalCommandOutcome::Accepted { operation_id: None }
+            }
+        };
+        let messages = self.drain_events().map(ServiceMessage::Event).collect();
+        (outcome, messages)
     }
 
     pub fn tick(&mut self, now: Instant) -> Vec<ServiceMessage> {
@@ -2001,7 +2062,7 @@ fn empty_solution() -> link::SolutionStatus {
     }
 }
 
-fn unknown_status() -> link::StatusSnapshot {
+pub(crate) fn unknown_status() -> link::StatusSnapshot {
     link::StatusSnapshot {
         controller: link::ControllerState::Ready,
         stand: unknown_stand(),
@@ -2343,6 +2404,29 @@ mod tests {
             link::StandPoseKind::Unknown
         );
         assert!(service.active_motion.is_none());
+    }
+
+    #[test]
+    fn local_control_uses_service_admission_and_emits_only_events() {
+        let base = Instant::now();
+        let mut service = RobotService::new(MockOutput::default(), StandCalibration::default());
+
+        let (outcome, messages) = service.handle_local_command(LocalCommand::RecoverToOpen, base);
+
+        assert_eq!(
+            outcome,
+            LocalCommandOutcome::Accepted {
+                operation_id: Some(1)
+            }
+        );
+        assert!(messages
+            .iter()
+            .all(|message| matches!(message, ServiceMessage::Event(_))));
+        assert_eq!(service.status().controller, link::ControllerState::Busy);
+        assert_eq!(
+            service.status().active_operation.unwrap().kind,
+            link::OperationKind::RecoverToOpen
+        );
     }
 
     #[test]

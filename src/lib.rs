@@ -10,6 +10,8 @@ pub mod grid;
 pub mod model;
 pub mod move_planner;
 #[cfg(feature = "pca9685")]
+pub mod operator_button;
+#[cfg(feature = "pca9685")]
 pub mod pca9685;
 pub mod postprocess;
 pub mod preprocess;

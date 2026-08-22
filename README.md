@@ -137,6 +137,22 @@ the stand:
 rubik-robotd --confirm-stand-motion
 ```
 
+The physical operator button uses two wires between Duo256M `GP21` (Linux GPIO
+`506`) and GND:
+
+```text
+GP21 ---- button ---- GND
+```
+
+At startup the daemon enables and reads back GP21's internal weak pull-up, then
+opens the active-low input with 50 ms debounce. No external resistor is needed.
+A press while open runs `Grip` followed by automatic scan/solve/execute. A
+press from any other idle pose runs collision-safe recovery to open. During an
+active operation it performs priority `Abort` followed by recovery; recovery
+is not started if Abort fails and the controller enters `Faulted`. Use
+`--no-button` only for diagnostics. A custom `--button-gpio` must provide its
+own electrically stable released level.
+
 Use the calibration in [`config/stand.toml`](config/stand.toml) as the starting
 point for the physical stand. Read the recovery, grip, abort, and session
 invariants in

@@ -153,6 +153,32 @@ There is no release between scan and execution. A recoverable scan or solver
 failure leaves the cube held in `CanonicalGrip`; a fatal mechanical failure
 disables outputs and requires recovery.
 
+## Physical operator button
+
+The active-low button has two wires between Milk-V Duo256M `GP21` (Linux GPIO
+`506`) and GND. Before opening the GPIO, `rubik-robotd` verifies that the pad is
+still muxed as `XGPIOA[26]`, enables its internal weak pull-up through the
+vendor-defined SG2002 pad register, and verifies the register read-back. No
+external resistor is needed for this pin. The daemon polls it with 50 ms
+debounce. A button held while the daemon starts is ignored until it has been
+released and pressed again, so startup alone cannot move the stand.
+
+One debounced press selects a workflow from authoritative Duo state:
+
+| Current state | Button action |
+|---|---|
+| No operation, pose `Open` | `Grip`; after that exact operation succeeds, `ScanSolveExecute` for the new cube session. |
+| No operation, any other known pose or `Unknown` | `RecoverToOpen`. |
+| Any active operation | Priority `Abort`; after the controller reaches `Aborted`, `RecoverToOpen`. |
+
+The follow-up is bound to the operation and cube-session IDs created by the
+service. A concurrent operation, rejected command, failed grip, or fault
+cancels it rather than guessing what happened. In particular, if disabling PWM
+during `Abort` fails and the controller enters `Faulted`, the button does not
+start recovery motion automatically. Pressing the button again while a
+button-started grip or automatic workflow is still active follows the same
+`Abort` then recovery path.
+
 ## Normal open
 
 `Open` is session-bound. Duo first restores the original Front and canonical
@@ -175,9 +201,10 @@ motion failures that make mechanical state uncertain.
 
 ## Reconnection
 
-Loss of BLE does not abort an autonomous Duo operation. The phone may reconnect
-and issue `GetStatus`; operation ID, current action, scan progress and plan
-preview reconstruct the UI. Only an explicit `Abort` stops the robot.
+Loss of Wi-Fi or the browser connection does not abort an autonomous Duo
+operation. The client may reconnect and issue `GetStatus`; operation ID,
+current action, scan progress and plan preview reconstruct the UI. Only an
+explicit `Abort` stops the robot.
 
 ## Deferred options
 
