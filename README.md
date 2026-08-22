@@ -1,30 +1,173 @@
-# Rubik Scan
+# Rubik Robot
 
-Experimental Rubik's Cube face scanner for the Milk-V Duo (SG2002 / CV181X).
-It detects the nine visible stickers and returns their colours in 3×3 order.
+An end-to-end software stack for an autonomous Rubik's Cube robot built around
+the Milk-V Duo 256M (SG2002). The project scans all six faces with a GC2083
+camera and the CV181X TPU, validates the cube state, solves it with min2phase,
+and executes the solution on an eight-servo gripper stand.
 
-The released PyTorch, ONNX and CV181X BF16 model files are described in
-[`models/README.md`](models/README.md).
-The engineering decisions, reproducible commands and deployment notes are in
-[`docs/PROJECT_NOTES.md`](docs/PROJECT_NOTES.md).
-Contribution and FFI safety rules are in
-[`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md).
+The repository also contains a server-authoritative 3D simulator. It runs the
+same robot service and motion planner without hardware, visualizes the cube and
+grippers in a browser, and checks motion sequencing before changes reach the
+physical mechanism.
 
-## Checkout
+## What is implemented
 
-The Milk-V Duo Buildroot SDK is a Git submodule. Clone the project with it:
+- GC2083 camera capture through the vendor VI/ISP/VPSS stack.
+- YOLO sticker detection on the CV181X TPU and conversion of six scans into a
+  validated `URFDLB` cube state.
+- min2phase solving and parsing of Singmaster moves.
+- Collision-aware planning for four rail servos and four gripper servos, with
+  optimized execution across compatible moves.
+- A stateful robot daemon, framed serial protocol, host CLI, and ESP32-C6
+  gateway/firmware components.
+- A browser-based 3D operator UI with scan/solve/execute, manual moves,
+  scramble loading, animation controls, and per-tab server-side sessions.
+- Rust unit tests and Playwright safety/animation tests, including all 18 face
+  turns and repeated scan/solve workflows.
+
+The simulator is an important pre-deployment check, but it does not replace
+inspection and cautious validation on the real stand: the current servos have
+no position or force feedback.
+
+## Run the simulator
+
+Install a current Rust toolchain, clone the repository, and run:
+
+```bash
+cargo run --features pca9685 --bin rubik-robotd-sim -- \
+  --addr 127.0.0.1:8022
+```
+
+Open <http://127.0.0.1:8022>. Each browser tab gets an independent robot,
+cube, solution, and animation-speed session, so manual work is isolated from
+other tabs and automated tests. Reloading a tab restores that tab's server-side
+snapshot. After rebuilding and restarting the server, connected tabs reload
+the embedded UI automatically.
+
+The normal simulator workflow is:
+
+```text
+Recover open -> Grip -> Load or Run moves -> Auto scan / solve / execute
+```
+
+`Grip` deliberately does not perform recovery automatically. A cube may be
+lying between the grippers, so rotating or closing from an unknown mechanical
+state would be unsafe.
+
+## Test locally
+
+Run the Rust workspace tests:
+
+```bash
+cargo test --features pca9685 --workspace
+```
+
+The Playwright suite starts its own simulator on port `18123`; it never reuses
+the operator server on port `8022`:
+
+```bash
+cd tests/ui
+npm install
+npx playwright install chromium
+npm test
+```
+
+## Inspect a move plan without hardware
+
+The planner CLI compares the conservative and optimized mechanical plans and
+prints their actions, servo targets, and estimated duration:
+
+```bash
+cargo run --bin rubik-move-plan -- "R U R' U' F2" --open-after
+```
+
+## Hardware build
+
+The Milk-V Duo Buildroot SDK is a pinned Git submodule. Clone it together with
+the project:
 
 ```bash
 git clone --recurse-submodules <repository-url>
 ```
 
-For an existing checkout, fetch the SDK recorded by this repository with:
+For an existing checkout:
 
 ```bash
 git submodule update --init --recursive
 ```
 
-The submodule is pinned to a specific revision of
-[`milkv-duo/duo-buildroot-sdk-v2`](https://github.com/milkv-duo/duo-buildroot-sdk-v2).
-Do not update it casually: the C headers, runtime libraries and cross-build
-environment must remain compatible with the Milk-V firmware used for testing.
+Do not update the SDK casually. Its headers, runtime libraries, musl ABI, and
+cross-toolchain must remain compatible with the firmware on the Duo.
+
+After building the SDK prerequisites described in
+[`docs/PROJECT_NOTES.md`](docs/PROJECT_NOTES.md), cross-compile the complete
+Duo binary set with:
+
+```bash
+./scripts/build-duo.sh
+```
+
+The production daemon requires an explicit acknowledgement before it can move
+the stand:
+
+```bash
+rubik-robotd --confirm-stand-motion
+```
+
+Use the calibration in [`config/stand.toml`](config/stand.toml) as the starting
+point for the physical stand. Read the recovery, grip, abort, and session
+invariants in
+[`docs/ROBOT_OPERATION_WORKFLOWS.md`](docs/ROBOT_OPERATION_WORKFLOWS.md)
+before enabling servo power.
+
+## Architecture
+
+```text
+GC2083 -> VI/ISP/VPSS -> YOLO on CV181X TPU -> six canonical faces
+                                                     |
+                                                     v
+                           validated cube state -> min2phase solution
+                                                     |
+                                                     v
+                robot service -> motion planner -> PCA9685 -> 8 servos
+                       |
+                       +-> serial protocol -> ESP32-C6 / host client
+                       +-> simulated stand -> HTTP/SSE -> browser 3D UI
+```
+
+The Duo owns authoritative robot state and motion planning. Operations are
+bound to cube-session, scan-revision, solution, and operation IDs so stale or
+duplicated commands cannot execute against a different physical state. On
+startup the mechanism is `Unknown`; collision-safe recovery opens both rail
+pairs before rotating grippers to their safe perpendicular pose.
+
+## Repository guide
+
+- `src/cube.rs` — face orientation, cube validation, and solver integration.
+- `src/move_planner.rs` — optimized collision-aware mechanical plans.
+- `src/robot_service.rs` — authoritative command and operation state machine.
+- `src/stand*.rs`, `src/pca9685.rs` — stand execution and servo control.
+- `src/camera.rs`, `src/tpu.rs`, `src/vision_scanner.rs` — camera-to-face
+  vision pipeline.
+- `src/sim_server.rs`, `web/` — isolated native simulator and embedded 3D UI.
+- `crates/rubik-link-*`, `firmware/` — transport protocol, gateway, and
+  ESP32-C6 controller.
+- `tests/ui/` — Playwright workflow, isolation, safety, and animation tests.
+
+## Documentation
+
+- [`docs/PROJECT_NOTES.md`](docs/PROJECT_NOTES.md) — engineering journal,
+  reproducible camera/TPU commands, deployment notes, and current simulator
+  behavior.
+- [`docs/ROBOT_OPERATION_WORKFLOWS.md`](docs/ROBOT_OPERATION_WORKFLOWS.md) —
+  safety and lifecycle contract for physical operations.
+- [`docs/ROBOT_CONTROL_PROTOCOL.md`](docs/ROBOT_CONTROL_PROTOCOL.md) — daemon
+  responsibilities, commands, events, and wire transports.
+- [`docs/planner-optimization.md`](docs/planner-optimization.md) — planner
+  optimization design and measured Cube20 results.
+- [`docs/wasm-simulator.md`](docs/wasm-simulator.md) — plan for a Web Worker /
+  WASM simulator deployable to GitHub Pages.
+- [`models/README.md`](models/README.md) — released PyTorch, ONNX, and CV181X
+  BF16 model artifacts.
+- [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) — contribution and FFI safety
+  rules.
