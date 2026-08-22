@@ -14,6 +14,7 @@ use std::{
     ffi::CString,
     fmt::Write as _,
     path::{Path, PathBuf},
+    process::Command,
 };
 
 pub struct VisionScanner {
@@ -123,6 +124,7 @@ impl FaceScanner for VisionScanner {
         let detections = postprocess::nms(detections, self.iou);
         let recognized = recognized_face(&detections)?;
         self.save_artifacts(face, &rgb, &detections, recognized)?;
+        sync_filesystems()?;
         Ok(recognized)
     }
 
@@ -162,6 +164,16 @@ impl FaceScanner for VisionScanner {
     fn abort(&mut self) {
         self.active_record = None;
     }
+}
+
+fn sync_filesystems() -> Result<()> {
+    let status = Command::new("sync")
+        .status()
+        .context("failed to run sync after saving scan face")?;
+    if !status.success() {
+        bail!("sync failed after saving scan face with status {status}");
+    }
+    Ok(())
 }
 
 fn recognized_face(detections: &[Detection]) -> Result<link::RecognizedFace> {

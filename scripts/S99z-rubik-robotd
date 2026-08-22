@@ -1,0 +1,58 @@
+#!/bin/sh
+
+DAEMON="/mnt/storage/rubik-robotd"
+CONFIG="/mnt/storage/stand.toml"
+PIDFILE="/var/run/rubik-robotd.pid"
+
+# Vendor camera and TPU shared libraries from the stock Milk-V Duo image.
+export LD_LIBRARY_PATH="/mnt/system/lib:/mnt/system/usr/lib:/mnt/system/usr/lib/3rd"
+
+start() {
+	printf 'Starting rubik-robotd: '
+	if [ ! -x "$DAEMON" ]; then
+		echo "FAIL ($DAEMON is missing or not executable)"
+		return 1
+	fi
+	if [ ! -r "$CONFIG" ]; then
+		echo "FAIL ($CONFIG is missing or unreadable)"
+		return 1
+	fi
+	start-stop-daemon -S -q -b -m -p "$PIDFILE" -x "$DAEMON" -- \
+		--confirm-stand-motion --config "$CONFIG"
+	status=$?
+	if [ "$status" -eq 0 ]; then
+		echo "OK"
+	else
+		echo "FAIL"
+	fi
+	return "$status"
+}
+
+stop() {
+	printf 'Stopping rubik-robotd: '
+	start-stop-daemon -K -q -p "$PIDFILE" -x "$DAEMON"
+	status=$?
+	if [ "$status" -eq 0 ]; then
+		rm -f "$PIDFILE"
+		echo "OK"
+	else
+		echo "FAIL"
+	fi
+	return "$status"
+}
+
+restart() {
+	stop
+	sleep 1
+	start
+}
+
+case "${1:-}" in
+	start|stop|restart)
+		"$1"
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart}"
+		exit 1
+		;;
+esac

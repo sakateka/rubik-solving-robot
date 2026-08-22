@@ -159,6 +159,21 @@ invariants in
 [`docs/ROBOT_OPERATION_WORKFLOWS.md`](docs/ROBOT_OPERATION_WORKFLOWS.md)
 before enabling servo power.
 
+To start the production daemon automatically after the Milk-V Duo boots, copy
+the binary, calibration, and BusyBox init script to the board:
+
+```sh
+cp rubik-robotd /mnt/storage/rubik-robotd
+cp stand.toml /mnt/storage/stand.toml
+cp S99z-rubik-robotd /etc/init.d/S99z-rubik-robotd
+chmod +x /mnt/storage/rubik-robotd /etc/init.d/S99z-rubik-robotd
+/etc/init.d/S99z-rubik-robotd start
+```
+
+The init script starts after the stock `S99user` hardware setup and loads the
+calibration from `/mnt/storage/stand.toml`. Each successfully recognized scan
+face is followed by a filesystem `sync` after its artifacts are saved.
+
 ## Architecture
 
 ```text
