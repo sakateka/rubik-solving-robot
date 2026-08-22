@@ -66,6 +66,31 @@ Face: [top-left, top-middle, top-right,
 прогресс и диагностическую ошибку. Он не должен быть частью логики решения и
 не должен блокировать движение или распознавание.
 
+Оператор может подключаться к роботу напрямую по Wi-Fi через ESP32-C6. C6
+поднимает собственную WPA2 access point с DHCP и по умолчанию отдаёт встроенный
+web-интерфейс на `http://192.168.4.1/`; домашняя сеть и Интернет для работы не
+нужны. Browser использует HTTP для status/commands и WebSocket для уведомлений
+о прогрессе. C6 переводит эти запросы в общий бинарный протокол и передаёт их
+по UART на Milk-V Duo:
+
+```text
+browser ── Wi-Fi / HTTP + WebSocket ──> ESP32-C6
+                                             │
+                                             │ UART, COBS frames
+                                             ▼
+                                       Milk-V Duo
+                                       rubik-robotd
+```
+
+ESP32-C6 отвечает только за Wi-Fi, web assets, HTTP/WebSocket, framing и
+маршрутизацию. Авторитетный state, admission/safety checks, scan, solver и
+motion plan остаются на Duo, поэтому переподключение browser не сбрасывает и
+не прерывает выполняемую операцию. SSID, WPA2 password, channel, address и port
+задаются при сборке firmware; дефолтный bring-up password `ChangeMe` необходимо
+заменить через ignored-файл `firmware/esp32c6-controller/config/local.toml`
+перед обычным использованием. Полный API и процедура сборки описаны в
+`docs/ROBOT_CONTROL_PROTOCOL.md` и `firmware/esp32c6-controller/README.md`.
+
 Ближайшая программная граница после camera scan: ввести типы `StickerColor`,
 `Face`, `CubeState`, таблицу scan poses и адаптер конкретной Rust-библиотеки
 solver. Управление реальными servo следует подключать после того, как state и

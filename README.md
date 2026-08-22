@@ -81,6 +81,29 @@ prints their actions, servo targets, and estimated duration:
 cargo run --bin rubik-move-plan -- "R U R' U' F2" --open-after
 ```
 
+## Connect to the robot over Wi-Fi
+
+The ESP32-C6 controller creates its own WPA2 access point with DHCP, so the
+robot does not need a home network or an Internet connection. With the Duo
+daemon and C6 firmware running:
+
+1. Connect a phone or laptop to the configured robot SSID.
+2. Open <http://192.168.4.1/>.
+3. Use the embedded operator UI to inspect status and run robot operations.
+
+The default bring-up configuration uses SSID `Rubik Robot` and password
+`ChangeMe`. **Replace that password before normal use** by creating
+`firmware/esp32c6-controller/config/local.toml` as described in the
+[ESP32-C6 firmware README](firmware/esp32c6-controller/README.md). Wi-Fi
+settings are compiled into the firmware, so changing them requires rebuilding
+and flashing the C6.
+
+The browser talks HTTP and WebSocket to the C6. The C6 forwards protocol
+requests over UART to `rubik-robotd` on the Milk-V Duo; the Duo remains the
+authoritative owner of robot state, safety checks, scanning, solving, and
+motion planning. The same interface is also available as an HTTP API; see the
+[control protocol](docs/ROBOT_CONTROL_PROTOCOL.md#wi-fi-and-http-transport).
+
 ## Hardware build
 
 The Milk-V Duo Buildroot SDK is a pinned Git submodule. Clone it together with
@@ -162,7 +185,7 @@ pairs before rotating grippers to their safe perpendicular pose.
 - [`docs/ROBOT_OPERATION_WORKFLOWS.md`](docs/ROBOT_OPERATION_WORKFLOWS.md) —
   safety and lifecycle contract for physical operations.
 - [`docs/ROBOT_CONTROL_PROTOCOL.md`](docs/ROBOT_CONTROL_PROTOCOL.md) — daemon
-  responsibilities, commands, events, and wire transports.
+  responsibilities, commands, events, and the Wi-Fi HTTP/WebSocket transport.
 - [`docs/planner-optimization.md`](docs/planner-optimization.md) — planner
   optimization design and measured Cube20 results.
 - [`docs/wasm-simulator.md`](docs/wasm-simulator.md) — plan for a Web Worker /
