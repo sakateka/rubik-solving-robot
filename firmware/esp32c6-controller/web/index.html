@@ -50,6 +50,8 @@
     tr:last-child td { border-bottom: 0; }
     .state-pill { display: inline-block; padding: .18rem .4rem; border-radius: .3rem; background: #222c32; font: .75rem ui-monospace, monospace; }
     .cube-net { display: grid; grid-template-columns: repeat(4, minmax(3.6rem, 1fr)); grid-template-areas: ". u . ." "l f r b" ". d . ."; gap: .45rem; width: min(100%, 35rem); margin: 0 auto; }
+    .scan-detail { margin: .8rem 0 0; color: var(--muted); font: .76rem/1.5 ui-monospace, monospace; overflow-wrap: anywhere; }
+    .scan-detail.error { color: var(--danger); }
     .face { min-width: 0; padding: .35rem; border: 1px solid var(--line); border-radius: .45rem; background: #0e1316; }
     .face[data-face="U"] { grid-area: u; }
     .face[data-face="R"] { grid-area: r; }
@@ -110,6 +112,7 @@
       <section class="panel">
         <h2>Scan · <span id="scan-summary">not started</span></h2>
         <div class="cube-net" id="cube-net"></div>
+        <p class="scan-detail" id="scan-detail">No scan data.</p>
       </section>
 
       <section class="panel">
@@ -209,6 +212,7 @@
       motion: ['Unknown', 'Stable', 'Moving'],
       operation: ['Grip', 'Scan', 'Solve', 'Execute', 'Scan → solve → execute', 'Open', 'Recover to open', 'Execute moves'],
       scan: ['None', 'In progress', 'Valid', 'Invalid'],
+      scanValidation: ['Wrong detection count', 'Wrong color totals', 'Duplicate center color', 'Invalid cube facelets', 'Camera failure', 'Inference failure'],
       solution: ['None', 'Solving', 'Ready', 'Executing', 'Completed'],
       action: ['Set rail', 'Set gripper', 'Wait', 'Capture face', 'Recognize face'],
       actionState: ['Pending', 'Running', 'Completed', 'Cancelled', 'Failed'],
@@ -294,7 +298,24 @@
       const scanned = scan?.scanned_faces ?? 0;
       const count = names.face.filter((_, index) => scanned & (1 << index)).length;
       const current = scan?.current_face == null ? '' : ` · camera ${enumName('face', scan.current_face)}`;
-      $('#scan-summary').textContent = `${enumName('scan', scan?.state)} · ${count}/6${current}`;
+      const validation = scan?.validation_error == null ? null : enumName('scanValidation', scan.validation_error);
+      const validationSummary = validation == null ? '' : ` · ${validation}`;
+      $('#scan-summary').textContent = `${enumName('scan', scan?.state)} · ${count}/6${current}${validationSummary}`;
+
+      const detail = $('#scan-detail');
+      if (scan?.state == null || scan.state === 0) {
+        detail.textContent = 'No scan data.';
+        detail.classList.remove('error');
+        return;
+      }
+      const counts = names.color.map((color, index) => `${color}:${scan?.color_counts?.[index] ?? 0}`).join(' · ');
+      const missing = names.face.filter((_, index) => !(scanned & (1 << index)));
+      const parts = [];
+      if (validation != null) parts.push(`Reason: ${validation}`);
+      parts.push(`Colors: ${counts}`);
+      if (missing.length) parts.push(`Missing faces: ${missing.join(', ')}`);
+      detail.textContent = parts.join(' · ');
+      detail.classList.toggle('error', validation != null);
     }
 
     function renderSolution(solution) {
@@ -369,7 +390,8 @@
 
       const session = value.cube_session?.id;
       $('#cube-state').textContent = session == null ? 'No cube' : `Session #${session}`;
-      $('#cube-detail').textContent = `${enumName('scan', value.scan?.state)} scan · ${enumName('solution', value.solution?.state)} solution`;
+      const scanError = value.scan?.validation_error == null ? '' : ` (${enumName('scanValidation', value.scan.validation_error)})`;
+      $('#cube-detail').textContent = `${enumName('scan', value.scan?.state)} scan${scanError} · ${enumName('solution', value.solution?.state)} solution`;
       renderStand(value.stand);
       renderFaces(value.scan);
       renderSolution(value.solution);

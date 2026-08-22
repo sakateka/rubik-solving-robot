@@ -28,6 +28,24 @@ use std::{
 const REQUEST_CACHE_CAPACITY: usize = 16;
 const SOLVER_MAX_MOVES: u8 = 21;
 
+#[derive(Debug)]
+pub struct WrongDetectionCountError {
+    pub actual: usize,
+}
+
+impl std::fmt::Display for WrongDetectionCountError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "expected {} detections, got {}; likely exposure, ROI, or geometry",
+            link::STICKERS_PER_FACE,
+            self.actual
+        )
+    }
+}
+
+impl std::error::Error for WrongDetectionCountError {}
+
 pub trait FaceScanner {
     fn available(&self) -> bool {
         true
@@ -1009,10 +1027,15 @@ where
                             }
                         }
                         Err(error) => {
-                            let _ = error;
+                            eprintln!("scan face {face:?} capture failed: {error:#}");
                             scan.failure = Some(link::OperationFailureKind::Recognition);
-                            self.status.scan.validation_error =
-                                Some(link::ScanValidationError::InferenceFailure);
+                            self.status.scan.validation_error = Some(
+                                if error.downcast_ref::<WrongDetectionCountError>().is_some() {
+                                    link::ScanValidationError::WrongDetectionCount
+                                } else {
+                                    link::ScanValidationError::InferenceFailure
+                                },
+                            );
                         }
                     }
                 }
@@ -2250,6 +2273,14 @@ mod tests {
         }
     }
 
+    struct WrongCountScanner;
+
+    impl FaceScanner for WrongCountScanner {
+        fn capture(&mut self, _face: link::CubeFace) -> anyhow::Result<link::RecognizedFace> {
+            Err(WrongDetectionCountError { actual: 7 }.into())
+        }
+    }
+
     fn recover_and_grip<S: FaceScanner>(service: &mut RobotService<MockOutput, S>, base: Instant) {
         service.handle_packet(&packet(link::RequestOpcode::RecoverToOpen, 1), base);
         for second in 0..=6 {
@@ -2595,6 +2626,10 @@ mod tests {
             link::StandPoseKind::CanonicalGrip
         );
         assert_eq!(service.status().scan.state, link::ScanStateKind::Invalid);
+        assert_eq!(
+            service.status().scan.validation_error,
+            Some(link::ScanValidationError::InferenceFailure)
+        );
         assert!(events.iter().any(|message| matches!(
             message,
             ServiceMessage::Event(EventMessage::OperationFailed(link::OperationFailed {
@@ -2602,6 +2637,30 @@ mod tests {
                 ..
             }))
         )));
+    }
+
+    #[test]
+    fn wrong_detection_count_has_a_specific_scan_validation_error() {
+        let base = Instant::now();
+        let mut service = RobotService::with_scanner(
+            MockOutput::default(),
+            StandCalibration::default(),
+            WrongCountScanner,
+        );
+        recover_and_grip(&mut service, base);
+        service.handle_packet(&start_scan_packet(1, 3), base);
+        for step in 0..100 {
+            service.tick(base + std::time::Duration::from_secs(10 + step));
+            if service.status().active_operation.is_none() {
+                break;
+            }
+        }
+
+        assert_eq!(service.status().scan.state, link::ScanStateKind::Invalid);
+        assert_eq!(
+            service.status().scan.validation_error,
+            Some(link::ScanValidationError::WrongDetectionCount)
+        );
     }
 
     #[test]
@@ -2822,7 +2881,7 @@ mod tests {
                 vec![(0, 2500)],
                 vec![(7, 2500)],
                 vec![(0, 1500)],
-                vec![(7, 1200)],
+                vec![(7, 1175)],
             ]
         );
     }
@@ -2898,7 +2957,7 @@ mod tests {
                 vec![(3, 2450)],
                 vec![(5, 2500), (7, 2500)],
                 vec![(3, 1450), (0, 1500)],
-                vec![(5, 1200), (7, 1200)],
+                vec![(5, 1175), (7, 1175)],
             ]
         );
     }

@@ -3,11 +3,22 @@
 DAEMON="/mnt/storage/rubik-robotd"
 CONFIG="/mnt/storage/stand.toml"
 PIDFILE="/var/run/rubik-robotd.pid"
+LOG_FIFO="/var/run/rubik-robotd.log.fifo"
+LOGGER_PIDFILE="/var/run/rubik-robotd.logger.pid"
 STOP_TIMEOUT=30
 RESTART_DELAY=2
+START_CHECK_DELAY=1
 
 # Vendor camera and TPU shared libraries from the stock Milk-V Duo image.
 export LD_LIBRARY_PATH="/mnt/system/lib:/mnt/system/usr/lib:/mnt/system/usr/lib/3rd"
+
+stop_logger() {
+	if [ -r "$LOGGER_PIDFILE" ]; then
+		logger_pid=$(cat "$LOGGER_PIDFILE")
+		kill "$logger_pid" 2>/dev/null || true
+	fi
+	rm -f "$LOGGER_PIDFILE" "$LOG_FIFO"
+}
 
 start() {
 	printf 'Starting rubik-robotd: '
@@ -19,20 +30,51 @@ start() {
 		echo "FAIL ($CONFIG is missing or unreadable)"
 		return 1
 	fi
-	start-stop-daemon -S -q -b -m -p "$PIDFILE" -x "$DAEMON" -- \
-		--confirm-stand-motion --config "$CONFIG"
-	status=$?
-	if [ "$status" -eq 0 ]; then
-		echo "OK"
-	else
-		echo "FAIL"
+	if [ -r "$PIDFILE" ]; then
+		pid=$(cat "$PIDFILE")
+		if kill -0 "$pid" 2>/dev/null; then
+			echo "FAIL (already running, pid=$pid)"
+			return 1
+		fi
+		rm -f "$PIDFILE"
 	fi
-	return "$status"
+	stop_logger
+	if ! mkfifo "$LOG_FIFO"; then
+		echo "FAIL (could not create $LOG_FIFO)"
+		return 1
+	fi
+	logger -t rubik-robotd <"$LOG_FIFO" &
+	logger_pid=$!
+	if ! echo "$logger_pid" >"$LOGGER_PIDFILE"; then
+		kill "$logger_pid" 2>/dev/null || true
+		rm -f "$LOG_FIFO"
+		echo "FAIL (could not write $LOGGER_PIDFILE)"
+		return 1
+	fi
+	logger -t rubik-robotd "=== rubik-robotd start: $(date) ==="
+	nohup "$DAEMON" --confirm-stand-motion --config "$CONFIG" \
+		>"$LOG_FIFO" 2>&1 </dev/null &
+	pid=$!
+	if ! echo "$pid" >"$PIDFILE"; then
+		kill "$pid" 2>/dev/null || true
+		stop_logger
+		echo "FAIL (could not write $PIDFILE)"
+		return 1
+	fi
+	sleep "$START_CHECK_DELAY"
+	if ! kill -0 "$pid" 2>/dev/null; then
+		rm -f "$PIDFILE"
+		stop_logger
+		echo "FAIL (daemon exited; check syslog tag rubik-robotd)"
+		return 1
+	fi
+	echo "OK (pid=$pid, syslog tag=rubik-robotd)"
 }
 
 stop() {
 	printf 'Stopping rubik-robotd: '
 	if [ ! -r "$PIDFILE" ]; then
+		stop_logger
 		echo "OK (not running)"
 		return 0
 	fi
@@ -45,6 +87,7 @@ stop() {
 	esac
 	if ! kill -0 "$pid" 2>/dev/null; then
 		rm -f "$PIDFILE"
+		stop_logger
 		echo "OK (stale PID file removed)"
 		return 0
 	fi
@@ -65,6 +108,7 @@ stop() {
 		waited=$((waited + 1))
 	done
 	rm -f "$PIDFILE"
+	stop_logger
 	echo "OK"
 }
 
@@ -93,7 +137,7 @@ status() {
 	executable=$(readlink "/proc/$pid/exe" 2>/dev/null || true)
 	case "$executable" in
 		"$DAEMON"|"$DAEMON (deleted)")
-			echo "rubik-robotd is running (pid=$pid)"
+			echo "rubik-robotd is running (pid=$pid, syslog tag=rubik-robotd)"
 			return 0
 			;;
 		*)

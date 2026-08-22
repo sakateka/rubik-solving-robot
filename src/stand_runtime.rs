@@ -1014,7 +1014,7 @@ mod tests {
                 OutputEvent::Set(vec![(5, 2500), (7, 2500)]),
                 OutputEvent::Set(vec![(4, 2500), (6, 2500)]),
                 OutputEvent::Set(vec![(0, 1500), (1, 1450), (2, 1450), (3, 1450)]),
-                OutputEvent::Set(vec![(4, 1200), (5, 1200), (6, 1200), (7, 1200)]),
+                OutputEvent::Set(vec![(4, 1200), (5, 1175), (6, 1200), (7, 1175)]),
             ]
         );
         assert_eq!(
@@ -1037,9 +1037,9 @@ mod tests {
             &runtime.output.events[events_before..],
             [OutputEvent::Set(vec![
                 (4, 1200),
-                (5, 1200),
+                (5, 1175),
                 (6, 1200),
-                (7, 1200)
+                (7, 1175)
             ])]
         );
         assert_eq!(
@@ -1079,7 +1079,7 @@ mod tests {
                 OutputEvent::Set(vec![(5, 2500), (7, 2500)]),
                 OutputEvent::Set(vec![(4, 2500), (6, 2500)]),
                 OutputEvent::Set(vec![(0, 1500), (1, 1450), (2, 1450), (3, 1450)]),
-                OutputEvent::Set(vec![(4, 1200), (5, 1200), (6, 1200), (7, 1200)]),
+                OutputEvent::Set(vec![(4, 1200), (5, 1175), (6, 1200), (7, 1175)]),
                 // Top/bottom retains the cube while left/right opens for L.
                 OutputEvent::Set(vec![(5, 2500), (7, 2500)]),
                 OutputEvent::Set(vec![(2, 400), (1, 2500)]),
@@ -1132,7 +1132,7 @@ mod tests {
                 OutputEvent::Set(vec![(3, 2450)]),
                 OutputEvent::Set(vec![(5, 2500)]),
                 OutputEvent::Set(vec![(3, 1450)]),
-                OutputEvent::Set(vec![(5, 1200)]),
+                OutputEvent::Set(vec![(5, 1175)]),
             ]
         );
         assert_eq!(&runtime.output.disabled_channels[3..], [vec![5], vec![5]]);
@@ -1228,7 +1228,7 @@ mod tests {
             &runtime.output.events[events_before..],
             [
                 OutputEvent::Set(vec![(2, 1450), (1, 1450)]),
-                OutputEvent::Set(vec![(5, 1200), (7, 1200)]),
+                OutputEvent::Set(vec![(5, 1175), (7, 1175)]),
                 OutputEvent::Set(vec![(4, 2500), (6, 2500)]),
                 OutputEvent::Set(vec![(3, 400), (0, 2500)]),
             ]
@@ -1340,7 +1340,7 @@ mod tests {
             &runtime.output.events[events_before..],
             [
                 OutputEvent::Set(vec![(2, 400), (1, 2500)]),
-                OutputEvent::Set(vec![(5, 1200), (7, 1200)]),
+                OutputEvent::Set(vec![(5, 1175), (7, 1175)]),
                 OutputEvent::Set(vec![(4, 2500), (6, 2500)]),
                 OutputEvent::Set(vec![(2, 1450), (1, 1450)]),
                 OutputEvent::Set(vec![(4, 1200), (6, 1200)]),
@@ -1369,7 +1369,7 @@ mod tests {
             &runtime.output.events[events_before..],
             [
                 OutputEvent::Set(vec![(2, 400), (1, 2500)]),
-                OutputEvent::Set(vec![(5, 1200), (7, 1200)]),
+                OutputEvent::Set(vec![(5, 1175), (7, 1175)]),
                 OutputEvent::Set(vec![(4, 2500), (6, 2500)]),
                 OutputEvent::Set(vec![(2, 1450), (1, 1450)]),
                 OutputEvent::Set(vec![(4, 1200), (6, 1200)]),

@@ -3242,19 +3242,44 @@ Production `VisionScanner` после успешной записи PNG, YOLO la
 запуска или выполнения `sync` считается ошибкой стороны. Это сокращает окно
 потери уже записанных артефактов при внезапном отключении питания.
 
-Имя каталога daemon scan теперь всегда заканчивается атомарно выделяемым
-числовым индексом:
+Имя каталога daemon scan больше не зависит от системной даты, времени или
+in-memory scan revision. Оно содержит только глобальный порядковый номер внутри
+`record_dir`:
 
 ```text
-scan-2026-08-22_10-00-00-r1-001
-scan-2026-08-22_10-00-00-r1-002
+scan-000001
+scan-000002
 ```
 
-При совпадении системного времени и scan revision после reboot код перебирает
-индексы и вызывает `create_dir` для каждого кандидата. `AlreadyExists` ведёт к
-следующему индексу, а любая другая filesystem error прерывает scan. Поэтому
-старые artifacts не перезаписываются даже при постоянно сбрасывающихся часах;
-атомарный `create_dir` также закрывает гонку между совпавшими попытками.
+Перед началом scan код перечисляет существующие имена, соответствующие точному
+pattern `scan-<decimal number>`, находит максимальный номер и начинает с
+`max + 1`. Имена прежнего timestamp-формата и любые посторонние файлы
+игнорируются. Каталог создаётся атомарным `create_dir`; если кандидат успел
+занять другой процесс, `AlreadyExists` увеличивает индекс ещё раз. Любая другая
+filesystem error прерывает scan. Старые artifacts не перезаписываются, а номер
+монотонно растёт между restart и reboot независимо от состояния часов.
+
+Ошибки production scanner больше не отбрасываются внутри `RobotService`:
+daemon log содержит logical face и полный error chain. Частный случай неверного
+числа boxes печатается с диагностической подсказкой:
+
+```text
+scan face Front capture failed: expected 9 detections, got 7; likely exposure, ROI, or geometry
+```
+
+Для `WrongDetectionCountError` protocol status использует специальный
+`ScanValidationError::WrongDetectionCount`, а остальные backend errors остаются
+`InferenceFailure`. C6 dashboard показывает validation reason рядом с Invalid,
+полные `W/Y/R/O/G/B` counts и список ещё не отсканированных faces.
+
+Init script больше не оставляет stderr фонового процесса привязанным к
+исчезающей boot/SSH console. Runtime FIFO в `/var/run` передаёт stdout/stderr в
+BusyBox `logger` с syslog tag `rubik-robotd`; постоянный отдельный logfile не
+создаётся. PID daemon и PID log pump хранятся раздельно, поэтому stop/status
+продолжают проверять именно executable робота. Через одну секунду script
+проверяет, что daemon не завершился во время camera/model init; при раннем
+падении `start` возвращает FAIL и направляет оператора в syslog. Смотреть поток
+можно командой `logread -f | grep rubik-robotd`.
 
 После изменений прошли host test suite и полный production cross-build через
 `scripts/build-duo.sh`.
